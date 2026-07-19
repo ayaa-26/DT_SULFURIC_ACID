@@ -1,4 +1,3 @@
-
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -11,8 +10,8 @@ import io
 import sys
 import os
 import base64
-from plant_3d import render_plant_3d
-# ── Ajout du répertoire racine au path ────────────────────────────────
+
+# ── Add root directory to path ────────────────────────────────────────
 ROOT = os.path.join(os.path.dirname(__file__), '..')
 sys.path.insert(0, ROOT)
 
@@ -31,7 +30,7 @@ from turbo_train import TurboBlowerTrain
 from drying_tower import DryingTower
 from air_filter import AirFilter
 
-# ── Import échangeurs ─────────────────────────────────────────────────
+# ── Import heat exchangers ─────────────────────────────────────────────────
 from exchangers import (
     HPSuperheater1B, HotInterpassHX, ColdInterpassHX,
     Economizer3B,
@@ -39,12 +38,12 @@ from exchangers import (
 )
 from exchangers_page import render_page_exchangers
 
-# ── Import bacs ───────────────────────────────────────────────────────
+# ── Import tanks ───────────────────────────────────────────────────────────
 from bac import TankSystem, FlowIn, FlowOut
 
 
 # ══════════════════════════════════════════════════════════════════════
-# PALETTE STYLE UNISIM-DESIGN
+# UNISIM-DESIGN STYLE PALETTE
 # ══════════════════════════════════════════════════════════════════════
 
 BG_MAIN      = '#B0B0B0'
@@ -72,7 +71,7 @@ METAL_MID    = '#B8B8B8'
 METAL_DARK   = '#888888'
 METAL_BORDER = '#606060'
 
-# ── Palette graphes DYNAMIQUE (fond sombre style oscilloscope) ────────
+# ── DYNAMIC tab graph palette (dark oscilloscope style) ────────
 DYN_BG       = '#0E1117'
 DYN_PANEL    = '#1A1D27'
 DYN_GRID     = '#2A2D3A'
@@ -86,7 +85,7 @@ DYN_WHITE    = '#E8E8F0'
 DYN_GRAY     = '#6A6D7A'
 
 COLORS_LITS  = [DYN_GREEN, DYN_ORANGE, DYN_CYAN, DYN_YELLOW]
-LABELS_LITS  = ['Couche 1', 'Couche 2', 'Couche 3', 'Couche 4']
+LABELS_LITS  = ['Bed 1', 'Bed 2', 'Bed 3', 'Bed 4']
 
 
 # ══════════════════════════════════════════════════════════════════════
