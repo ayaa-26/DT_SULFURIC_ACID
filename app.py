@@ -1,22 +1,16 @@
 # =====================================================================
-# app.py  –  Supervision UniSim-Design — Sulfuric Acid Plant
+# app.py  –  UniSim-Design Supervision — Sulfuric Acid Plant
 #
-# Compatible avec :
-#   - model/four.py          : classe Furnace  (dynamique)
+# Compatible with:
+#   - model/four.py          : Furnace class (dynamic)
 #   - model/convertisseur.py : JumeauNumeriqueConvertisseur (PDE/RK4)
 #   - simulation/main_simulation.py : simuler_complet()
 #
-# v5 — Corrections de mise en page (layout GLOBAL PROCESS) :
-#   • Espacement vertical des lits catalytiques augmenté (GAP 1.55 -> 1.75)
-#   • Boîte de données des lits (draw_bed_unisim) resserrée (BOX_W 2.00 -> 1.70)
-#     pour ne plus chevaucher JD03
-#   • data_box four (SO2/O2/T) déplacée au-dessus du four sans déborder
-#   • data_box chaudière repositionnée pour ne plus chevaucher F-VAP
-#   • Légende fluides remontée et recentrée, hors de la zone bacs/four
-#   • xlim global élargi pour que l'horodatage et le bord droit ne soient
-#     plus coupés
-#   • Offset vertical standardisé (Y_OFFSET_BOX) pour aligner les data_box
-#     annexes de la rangée du bas (filtre, tour de séchage, turbosoufflante)
+# v3 — Added DYNAMIC tab:
+#   • Simulated time response (step +5% sulfur flow at t=60s)
+#   • Spatial profiles per bed (T, tau, r)
+#   • Furnace and boiler thermal profiles
+#   • SO3 ppm balance and absorption efficiencies
 # =====================================================================
 
 import numpy as np
@@ -31,12 +25,12 @@ import io
 import sys
 import os
 import base64
-from views.plant_3d import render_plant_3d
-# ── Ajout du répertoire racine au path ────────────────────────────────
+
+# ── Add root directory to path ────────────────────────────────────────
 ROOT = os.path.join(os.path.dirname(__file__), '..')
 sys.path.insert(0, ROOT)
 
-from model.four import (
+from four import (
     DEFAULT_T_AIR_C  as DEFAULT_T_AIR,
     DEFAULT_T_SOUFRE_C as DEFAULT_T_S,
     DEFAULT_F_SOUFRE_KGMIN as DEFAULT_S,
@@ -45,26 +39,26 @@ from model.four import (
 )
 DEFAULT_RATIO = 1.0 - DEFAULT_BYPASS_PCT / 100.0
 
-from model.chaudiere import T_TARGET_CONV
-from simulation.main_simulation import simuler_complet
+from chaudiere import T_TARGET_CONV
+from main_simulation import simuler_complet
 from turbo_train import TurboBlowerTrain
 from drying_tower import DryingTower
 from air_filter import AirFilter
 
-# ── Import échangeurs ─────────────────────────────────────────────────
-from model.exchangers import (
+# ── Import heat exchangers ─────────────────────────────────────────────────
+from exchangers import (
     HPSuperheater1B, HotInterpassHX, ColdInterpassHX,
     Economizer3B,
     HP4AExchanger, LP4AExchanger, E4CExchanger, E4AExchanger,
 )
-from model.exchangers_page import render_page_exchangers
+from exchangers_page import render_page_exchangers
 
-# ── Import bacs ───────────────────────────────────────────────────────
-from model.bac import TankSystem, FlowIn, FlowOut
+# ── Import tanks ───────────────────────────────────────────────────────────
+from bac import TankSystem, FlowIn, FlowOut
 
 
 # ══════════════════════════════════════════════════════════════════════
-# PALETTE STYLE UNISIM-DESIGN
+# UNISIM-DESIGN STYLE PALETTE
 # ══════════════════════════════════════════════════════════════════════
 
 BG_MAIN      = '#B0B0B0'
@@ -92,7 +86,7 @@ METAL_MID    = '#B8B8B8'
 METAL_DARK   = '#888888'
 METAL_BORDER = '#606060'
 
-# ── Palette graphes DYNAMIQUE (fond sombre style oscilloscope) ────────
+# ── DYNAMIC tab graph palette (dark oscilloscope style) ────────
 DYN_BG       = '#0E1117'
 DYN_PANEL    = '#1A1D27'
 DYN_GRID     = '#2A2D3A'
@@ -106,11 +100,11 @@ DYN_WHITE    = '#E8E8F0'
 DYN_GRAY     = '#6A6D7A'
 
 COLORS_LITS  = [DYN_GREEN, DYN_ORANGE, DYN_CYAN, DYN_YELLOW]
-LABELS_LITS  = ['Couche 1', 'Couche 2', 'Couche 3', 'Couche 4']
+LABELS_LITS  = ['Bed 1', 'Bed 2', 'Bed 3', 'Bed 4']
 
 
 # ══════════════════════════════════════════════════════════════════════
-# HELPERS GRAPHIQUES — STYLE UNISIM
+# GRAPHIC HELPERS — UNISIM STYLE
 # ══════════════════════════════════════════════════════════════════════
 
 def unisim_bg(fig, ax, xlim=(0, 24), ylim=(0, 11)):
@@ -277,67 +271,31 @@ def draw_compressor_unisim(ax, cx, cy, R, title='', tag=''):
             ha='center', va='top', fontfamily='monospace', zorder=8)
 
 
-# ══════════════════════════════════════════════════════════════════════
-# DATA_BOX — VERSION CORRIGÉE : lisibilité, espacement valeur/unité
-# ══════════════════════════════════════════════════════════════════════
-
-def data_box(ax, x, y, lines, w=1.80, color=FG_DATA, unit_color='#88FFBB'):
-    """
-    Boîte de données style terminal.
-    Chaque ligne peut être :
-      - (valeur_str, label_str)  → valeur à droite en vert, label en petit à droite
-      - (texte_str,)             → texte centré (titre)
-      - str simple               → texte aligné à gauche
-    Corrections v4 :
-      • Hauteur de ligne augmentée (0.32 au lieu de 0.26)
-      • Police valeur = 9pt (au lieu de 8), label = 7.5pt (au lieu de 6.5)
-      • Valeur alignée à gauche sur une sous-zone, label bien séparé à droite
-      • Fond légèrement agrandi (padding 0.08)
-    """
-    LH   = 0.32          # hauteur d'une ligne
-    PAD  = 0.08          # padding interne
-    h    = len(lines) * LH + PAD * 2
-    W    = w
-
-    # Fond noir arrondi
-    ax.add_patch(FancyBboxPatch(
-        (x, y), W, h,
-        boxstyle="round,pad=0.03",
-        facecolor=BG_DATA, edgecolor='#666666', lw=1.2, zorder=15))
-
+def data_box(ax, x, y, lines, w=1.55, color=FG_DATA, unit_color='#88FFBB'):
+    lh = 0.26
+    h = len(lines) * lh + 0.10
+    ax.add_patch(FancyBboxPatch((x, y), w, h,
+                               boxstyle="square,pad=0",
+                               facecolor=BG_DATA, edgecolor='#555', lw=1.0, zorder=15))
     for i, line in enumerate(lines):
-        # Ligne du bas vers le haut (première ligne = en haut)
-        yy = y + h - PAD - (i + 0.5) * LH
-
+        yy = y + h - (i + 1) * lh + 0.04
         if isinstance(line, tuple):
             if len(line) == 2:
-                val_str, lbl_str = line
-                # ── Colonne gauche : label (ex: "T_in", "°C", "kPa") ──
-                ax.text(x + 0.10, yy, lbl_str,
-                        color=unit_color,
-                        fontsize=7.5, fontweight='normal',
-                        ha='left', va='center',
+                val, unit = line
+                ax.text(x + w - 0.22, yy, val, color=color,
+                        fontsize=8, fontweight='bold', ha='right', va='center',
                         fontfamily='monospace', zorder=16)
-                # ── Colonne droite : valeur numérique ──
-                ax.text(x + W - 0.10, yy, val_str,
-                        color=color,
-                        fontsize=9, fontweight='bold',
-                        ha='right', va='center',
+                ax.text(x + w - 0.06, yy, unit, color=unit_color,
+                        fontsize=6.5, ha='right', va='center',
                         fontfamily='monospace', zorder=16)
             else:
-                # Titre centré
                 txt = line[0]
-                ax.text(x + W / 2, yy, txt,
-                        color='#FFFFFF',
-                        fontsize=8.5, fontweight='bold',
-                        ha='center', va='center',
+                ax.text(x + w / 2, yy, txt, color=color,
+                        fontsize=8, fontweight='bold', ha='center', va='center',
                         fontfamily='monospace', zorder=16)
         else:
-            # Texte libre aligné à gauche
-            ax.text(x + 0.10, yy, line,
-                    color=color,
-                    fontsize=8, fontweight='bold',
-                    ha='left', va='center',
+            ax.text(x + 0.08, yy, line, color=color,
+                    fontsize=7.5, fontweight='bold', ha='left', va='center',
                     fontfamily='monospace', zorder=16)
 
 
@@ -394,21 +352,7 @@ def draw_valve_symbol(ax, cx, cy, r=0.12):
                 color='#444', lw=1.2, zorder=13)
 
 
-# ══════════════════════════════════════════════════════════════════════
-# draw_bed_unisim — VERSION CORRIGÉE v5 : boîte resserrée (BOX_W=1.70)
-# ══════════════════════════════════════════════════════════════════════
-
 def draw_bed_unisim(ax, cx, cy, w, h, bed_num, t_in, t_out, conv_pct, dp_kpa=0.0):
-    """
-    Dessine un lit catalytique avec sa boîte de données.
-    Corrections v5 :
-      • BOX_W réduit de 2.00 à 1.70 et décalage à gauche réduit (0.15 -> 0.25
-        compensé par la largeur plus faible) pour éviter le chevauchement
-        avec les tours d'absorption JD02/JD03 sur la page GLOBAL PROCESS.
-      • Les labels sont sur la colonne gauche, les valeurs sur la droite
-      • Séparateur visuel entre T_in et T_out
-    """
-    # ── Corps du lit ──────────────────────────────────────────────
     n = 20
     for i in range(n):
         frac = i / n
@@ -422,48 +366,15 @@ def draw_bed_unisim(ax, cx, cy, w, h, bed_num, t_in, t_out, conv_pct, dp_kpa=0.0
             color='#999', lw=0.7, zorder=5, alpha=0.6)
     ax.plot([cx + w / 2 - 0.05, cx - w / 2 + 0.05], [cy - h / 3, cy + h / 3],
             color='#999', lw=0.7, zorder=5, alpha=0.6)
-    ax.text(cx, cy + h / 2 + 0.14, f"COUCHE {bed_num}",
+    ax.text(cx, cy + h / 2 + 0.14, f"BED {bed_num}",
             color='#111', fontsize=7.5, fontweight='bold',
             ha='center', va='bottom', fontfamily='monospace', zorder=6)
-
-    # ── Boîte de données à gauche du lit ─────────────────────────
-    # Chaque ligne : (label, valeur) pour bien séparer visuellement
-    BOX_W = 1.70
-    bx = cx - w / 2 - BOX_W - 0.25
-    by = cy - 0.70
-
-    lines = [
-        ("T_in  :", f"{t_in:.1f} °C"),
-        ("T_out :", f"{t_out:.1f} °C"),
-        ("Conv  :", f"{conv_pct:.2f} %"),
-        ("\u0394P    :", f"{dp_kpa:.2f} kPa"),
-    ]
-
-    LH = 0.30
-    PAD = 0.08
-    box_h = len(lines) * LH + PAD * 2
-
-    ax.add_patch(FancyBboxPatch(
-        (bx, by), BOX_W, box_h,
-        boxstyle="round,pad=0.03",
-        facecolor='#0A0A0A', edgecolor='#555555', lw=1.2, zorder=15))
-
-    # Ligne de séparation après T_out (après la 2e ligne)
-    sep_y = by + box_h - PAD - 2 * LH
-    ax.plot([bx + 0.06, bx + BOX_W - 0.06], [sep_y, sep_y],
-            color='#333333', lw=0.8, zorder=16)
-
-    label_colors = ['#00CCFF', '#00FF88', '#FFD700', '#FF9944']
-    for i, (lbl, val) in enumerate(lines):
-        yy = by + box_h - PAD - (i + 0.5) * LH
-        # Label (colonne gauche)
-        ax.text(bx + 0.10, yy, lbl,
-                color=label_colors[i], fontsize=7.5, fontweight='normal',
-                ha='left', va='center', fontfamily='monospace', zorder=16)
-        # Valeur (colonne droite)
-        ax.text(bx + BOX_W - 0.08, yy, val,
-                color='#00FF44', fontsize=9, fontweight='bold',
-                ha='right', va='center', fontfamily='monospace', zorder=16)
+    data_box(ax, cx - w / 2 - 1.70, cy - 0.30, [
+        (f"{t_in:.2f}", "°C in"),
+        (f"{t_out:.2f}", "°C out"),
+        (f"X={conv_pct:.2f}", "%"),
+        (f"ΔP={dp_kpa:.2f}", "kPa"),
+    ], w=1.60)
 
 
 def draw_tank_unisim(ax, cx, cy, w, h, label, tag, level_pct, T, density,
@@ -489,28 +400,24 @@ def draw_tank_unisim(ax, cx, cy, w, h, label, tag, level_pct, T, density,
     ax.text(cx, cy - 0.10, tag, color='#333', fontsize=6,
             ha='center', va='center', fontfamily='monospace', zorder=8)
     lines_data = [
-        ("NIV :", f"{level_pct:.1f} %"),
-        ("T   :", f"{T:.1f} °C"),
-        ("ρ   :", f"{density:.0f} kg/m³"),
+        (f"{level_pct:.2f}", "% LVL"),
+        (f"{T:.2f}", "°C"),
+        (f"{density:.1f}", "kg/m³"),
     ]
     if extra:
-        for e in extra:
-            if isinstance(e, tuple) and len(e) == 2:
-                lines_data.append((e[1] + " :", e[0]))
-            else:
-                lines_data.append(e)
-    data_box(ax, cx + w / 2 - 1.3, cy - len(lines_data) * 0.16 - 1.65,
-             lines_data, w=1.90)
+        lines_data.extend(extra)
+    data_box(ax, cx + w / 2 - 1.3, cy - len(lines_data) * 0.13 - 1.6,
+             lines_data, w=1.60)
 
 
 # ══════════════════════════════════════════════════════════════════════
-# HELPERS GRAPHIQUES — PAGE DYNAMIQUE (style oscilloscope sombre)
+# GRAPHIC HELPERS — DYNAMIC PAGE (dark oscilloscope style)
 # ══════════════════════════════════════════════════════════════════════
 
 def _dyn_style_ax(ax, title='', xlabel='', ylabel='', ylim=None):
-    """Applique le style sombre oscilloscope à un axe matplotlib."""
+    """Apply dark oscilloscope style to a matplotlib axis."""
     ax.set_facecolor(DYN_PANEL)
-    ax.tick_params(colors=DYN_WHITE, labelsize=9)
+    ax.tick_params(colors=DYN_WHITE, labelsize=8)
     ax.xaxis.label.set_color(DYN_WHITE)
     ax.yaxis.label.set_color(DYN_WHITE)
     ax.title.set_color(DYN_GREEN)
@@ -518,49 +425,41 @@ def _dyn_style_ax(ax, title='', xlabel='', ylabel='', ylim=None):
     ax.spines['left'].set_color(DYN_GRID)
     ax.spines['top'].set_color(DYN_GRID)
     ax.spines['right'].set_color(DYN_GRID)
-    ax.grid(True, color=DYN_GRID, linewidth=0.7, alpha=0.9)
+    ax.grid(True, color=DYN_GRID, linewidth=0.6, alpha=0.8)
     if title:
-        ax.set_title(title, fontsize=10, fontweight='bold',
-                     fontfamily='monospace', color=DYN_GREEN, pad=8)
+        ax.set_title(title, fontsize=9, fontweight='bold',
+                     fontfamily='monospace', color=DYN_GREEN, pad=6)
     if xlabel:
-        ax.set_xlabel(xlabel, fontsize=9, fontfamily='monospace')
+        ax.set_xlabel(xlabel, fontsize=8, fontfamily='monospace')
     if ylabel:
-        ax.set_ylabel(ylabel, fontsize=9, fontfamily='monospace')
+        ax.set_ylabel(ylabel, fontsize=8, fontfamily='monospace')
     if ylim:
         ax.set_ylim(*ylim)
 
 
 def _dyn_fig(nrows, ncols, figsize):
-    """
-    Crée une figure avec fond sombre pour les graphes DYNAMIQUE.
-    Corrections v4 : hspace/wspace augmentés pour éviter les chevauchements.
-    """
+    """Create a figure with dark background for DYNAMIC graphs."""
     fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
     fig.patch.set_facecolor(DYN_BG)
-    fig.subplots_adjust(
-        hspace=0.58,   # augmenté (était 0.45)
-        wspace=0.42,   # augmenté (était 0.35)
-        left=0.07, right=0.97,
-        top=0.92, bottom=0.10
-    )
+    fig.subplots_adjust(hspace=0.45, wspace=0.35,
+                        left=0.07, right=0.97, top=0.93, bottom=0.09)
     return fig, axes
 
 
-def _add_echelon_line(ax, t_echelon, label=True):
-    """Trace la ligne verticale de l'échelon de perturbation."""
-    ax.axvline(x=t_echelon, color=DYN_RED, lw=1.2, linestyle='--', alpha=0.8)
+def _add_step_line(ax, t_step, label=True):
+    """Draw vertical line for the disturbance step."""
+    ax.axvline(x=t_step, color=DYN_RED, lw=1.2, linestyle='--', alpha=0.8)
     if label:
-        ylim = ax.get_ylim()
-        ax.text(t_echelon + 5, ylim[0] + (ylim[1] - ylim[0]) * 0.05,
-                'Échelon\n+5% S', color=DYN_RED, fontsize=7,
+        ax.text(t_step + 5, ax.get_ylim()[0] + (ax.get_ylim()[1] - ax.get_ylim()[0]) * 0.05,
+                'Step\n+5% S', color=DYN_RED, fontsize=6.5,
                 fontfamily='monospace', va='bottom')
 
 
 def _fig_to_b64(fig, dpi=130):
-    """Convertit une figure matplotlib en base64 pour st.markdown."""
+    """Convert a matplotlib figure to base64 for st.markdown."""
     buf = io.BytesIO()
     fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight',
-                pad_inches=0.10, facecolor=fig.get_facecolor())
+                pad_inches=0.05, facecolor=fig.get_facecolor())
     buf.seek(0)
     b64 = base64.b64encode(buf.read()).decode()
     plt.close(fig)
@@ -569,7 +468,12 @@ def _fig_to_b64(fig, dpi=130):
 
 def render_page_dynamique(results):
     """
-    Génère et affiche tous les graphes de la page DYNAMIQUE.
+    Generate and display all DYNAMIC page graphs.
+    Expected in results:
+        results['historique']         → dict with t, tau_global, T_out_lits, ...
+        results['convertisseur']['profils_lits']  → list of 4 dicts {z, T_C, tau, r, dp}
+        results['four']['z_profil'], results['four']['T_profil']
+        results['chaudiere']['z_profil'], results['chaudiere']['T_gaz_profil'], ...
     """
     hist = results.get('historique', {})
     conv = results.get('convertisseur', {})
@@ -578,35 +482,34 @@ def render_page_dynamique(results):
     chaud   = results.get('chaudiere', {})
 
     t            = np.array(hist.get('t', []))
-    t_echelon    = hist.get('t_echelon', 60.0)
+    t_step       = hist.get('t_echelon', 60.0)
     delta_S_pct  = hist.get('delta_S_pct', 5.0)
 
-    # ── Bandeau récapitulatif KPI ─────────────────────────────────
+    # ── KPI summary banner ─────────────────────────────────────────
     st.markdown("""
     <div style="background:#1A1D27;border:1px solid #2A2D3A;border-radius:6px;
-                padding:12px 20px;margin-bottom:14px;font-family:'Courier New',monospace;">
-      <span style="color:#00FF88;font-weight:bold;font-size:14px;">
-        PAGE DYNAMIQUE — COMPORTEMENT TEMPOREL &amp; PROFILS SPATIAUX</span>
-      <span style="color:#6A6D7A;font-size:12px;margin-left:24px;">
-        Perturbation simulée : échelon +{:.0f}% débit soufre à t = {:.0f} s</span>
+                padding:10px 18px;margin-bottom:12px;font-family:'Courier New',monospace;">
+      <span style="color:#00FF88;font-weight:bold;font-size:13px;">
+        DYNAMIC PAGE — TEMPORAL RESPONSE & SPATIAL PROFILES</span>
+      <span style="color:#6A6D7A;font-size:11px;margin-left:20px;">
+        Simulated disturbance: step +{:.0f}% sulfur flow at t = {:.0f} s</span>
     </div>
-    """.format(delta_S_pct, t_echelon), unsafe_allow_html=True)
+    """.format(delta_S_pct, t_step), unsafe_allow_html=True)
 
     if len(t) == 0:
-        st.warning("Aucun historique disponible. Lancez d'abord une simulation.")
+        st.warning("No history available. Please run a simulation first.")
         return
 
     # ══════════════════════════════════════════════════════════════
-    # SECTION 1 — Réponses temporelles globales
+    # SECTION 1 — Global temporal responses
     # ══════════════════════════════════════════════════════════════
     st.markdown(
         '<div style="color:#00FF88;font-family:\'Courier New\',monospace;'
-        'font-size:13px;font-weight:bold;border-left:3px solid #00FF88;'
-        'padding-left:12px;margin:12px 0 8px 0;">1 — RÉPONSES TEMPORELLES GLOBALES</div>',
+        'font-size:12px;font-weight:bold;border-left:3px solid #00FF88;'
+        'padding-left:10px;margin:10px 0 6px 0;">1 — GLOBAL TEMPORAL RESPONSES</div>',
         unsafe_allow_html=True)
 
-    # figsize agrandi : (20, 9) au lieu de (18, 8)
-    fig1, axes1 = _dyn_fig(2, 3, figsize=(20, 9))
+    fig1, axes1 = _dyn_fig(2, 3, figsize=(18, 8))
 
     tau_global = np.array(hist.get('tau_global', []))
     T_four_t   = np.array(hist.get('T_four', []))
@@ -615,111 +518,117 @@ def render_page_dynamique(results):
     S_t        = np.array(hist.get('S_flow', []))
     ppm_so3_t  = np.array(hist.get('ppm_so3', []))
 
+    # Graph 1: global τ(t)
     ax = axes1[0, 0]
-    ax.plot(t, tau_global, color=DYN_GREEN, lw=2.0)
+    ax.plot(t, tau_global, color=DYN_GREEN, lw=1.8)
     ax.fill_between(t, tau_global, alpha=0.12, color=DYN_GREEN)
-    _dyn_style_ax(ax, title='τ global convertisseur (%)',
-                  xlabel='Temps (s)', ylabel='Taux de conversion (%)')
-    _add_echelon_line(ax, t_echelon)
+    _dyn_style_ax(ax, title='Global converter conversion rate τ (%)',
+                  xlabel='Time (s)', ylabel='Conversion rate (%)')
+    _add_step_line(ax, t_step)
 
+    # Graph 2: furnace outlet T(t)
     ax = axes1[0, 1]
-    ax.plot(t, T_four_t, color=DYN_ORANGE, lw=2.0)
+    ax.plot(t, T_four_t, color=DYN_ORANGE, lw=1.8)
     ax.fill_between(t, T_four_t, alpha=0.10, color=DYN_ORANGE)
-    _dyn_style_ax(ax, title='T sortie four 401AF01 (°C)',
-                  xlabel='Temps (s)', ylabel='Température (°C)')
-    _add_echelon_line(ax, t_echelon)
+    _dyn_style_ax(ax, title='Furnace 401AF01 outlet T (°C)',
+                  xlabel='Time (s)', ylabel='Temperature (°C)')
+    _add_step_line(ax, t_step)
 
+    # Graph 3: sulfur flow S(t)
     ax = axes1[0, 2]
-    ax.plot(t, S_t, color=DYN_YELLOW, lw=2.0, drawstyle='steps-post')
-    _dyn_style_ax(ax, title='Débit soufre alimenté (kg/min)',
-                  xlabel='Temps (s)', ylabel='Débit (kg/min)')
-    _add_echelon_line(ax, t_echelon, label=False)
+    ax.plot(t, S_t, color=DYN_YELLOW, lw=1.8, drawstyle='steps-post')
+    _dyn_style_ax(ax, title='Sulfur feed flow rate (kg/min)',
+                  xlabel='Time (s)', ylabel='Flow rate (kg/min)')
+    _add_step_line(ax, t_step, label=False)
 
+    # Graph 4: steam produced
     ax = axes1[1, 0]
-    ax.plot(t, steam_t, color=DYN_RED, lw=2.0)
+    ax.plot(t, steam_t, color=DYN_RED, lw=1.8)
     ax.fill_between(t, steam_t, alpha=0.12, color=DYN_RED)
-    _dyn_style_ax(ax, title='Vapeur produite — 401AV01 (t/h)',
-                  xlabel='Temps (s)', ylabel='Débit vapeur (t/h)')
-    _add_echelon_line(ax, t_echelon)
+    _dyn_style_ax(ax, title='Steam produced — 401AV01 (t/h)',
+                  xlabel='Time (s)', ylabel='Steam flow (t/h)')
+    _add_step_line(ax, t_step)
 
+    # Graph 5: recovered power
     ax = axes1[1, 1]
-    ax.plot(t, power_t, color=DYN_CYAN, lw=2.0)
+    ax.plot(t, power_t, color=DYN_CYAN, lw=1.8)
     ax.fill_between(t, power_t, alpha=0.10, color=DYN_CYAN)
-    _dyn_style_ax(ax, title='Puissance récupérée chaudière (MW)',
-                  xlabel='Temps (s)', ylabel='Puissance (MW)')
-    _add_echelon_line(ax, t_echelon)
+    _dyn_style_ax(ax, title='Boiler recovered power (MW)',
+                  xlabel='Time (s)', ylabel='Power (MW)')
+    _add_step_line(ax, t_step)
 
+    # Graph 6: SO3 ppm stack
     ax = axes1[1, 2]
-    ax.plot(t, ppm_so3_t, color=DYN_PURPLE, lw=2.0)
-    ax.axhline(y=10.0, color=DYN_RED, lw=1.2, linestyle=':', alpha=0.7,
-               label='Seuil réglementaire')
+    ax.plot(t, ppm_so3_t, color=DYN_PURPLE, lw=1.8)
+    ax.axhline(y=10.0, color=DYN_RED, lw=1.0, linestyle=':', alpha=0.7,
+               label='Regulatory limit')
     ax.fill_between(t, ppm_so3_t, alpha=0.10, color=DYN_PURPLE)
-    _dyn_style_ax(ax, title='SO3 résiduel cheminée (ppm)',
-                  xlabel='Temps (s)', ylabel='SO3 (ppm)')
-    ax.legend(fontsize=8, facecolor=DYN_PANEL, edgecolor=DYN_GRID,
+    _dyn_style_ax(ax, title='Residual SO3 stack emission (ppm)',
+                  xlabel='Time (s)', ylabel='SO3 (ppm)')
+    ax.legend(fontsize=6.5, facecolor=DYN_PANEL, edgecolor=DYN_GRID,
               labelcolor=DYN_WHITE, loc='upper right')
-    _add_echelon_line(ax, t_echelon)
+    _add_step_line(ax, t_step)
 
-    b64_1 = _fig_to_b64(fig1, dpi=140)
+    b64_1 = _fig_to_b64(fig1)
     st.markdown(
         f'<img src="data:image/png;base64,{b64_1}" '
-        f'style="width:100%;border-radius:4px;margin-bottom:10px;" />',
+        f'style="width:100%;border-radius:4px;margin-bottom:8px;" />',
         unsafe_allow_html=True)
 
     # ══════════════════════════════════════════════════════════════
-    # SECTION 2 — Températures de sortie par lit (t)
+    # SECTION 2 — Catalytic bed outlet temperatures vs time
     # ══════════════════════════════════════════════════════════════
     st.markdown(
         '<div style="color:#00FF88;font-family:\'Courier New\',monospace;'
-        'font-size:13px;font-weight:bold;border-left:3px solid #00FF88;'
-        'padding-left:12px;margin:12px 0 8px 0;">2 — TEMPÉRATURES DE SORTIE DES LITS CATALYTIQUES</div>',
+        'font-size:12px;font-weight:bold;border-left:3px solid #00FF88;'
+        'padding-left:10px;margin:10px 0 6px 0;">2 — CATALYTIC BED OUTLET TEMPERATURES</div>',
         unsafe_allow_html=True)
 
-    # figsize agrandi : (20, 6) au lieu de (18, 5)
-    fig2, axes2 = _dyn_fig(1, 2, figsize=(20, 6))
+    fig2, axes2 = _dyn_fig(1, 2, figsize=(18, 5))
 
     T_out_lits_t = hist.get('T_out_lits', [])
 
+    # Graph A: T_out_bed(t) for all 4 beds on same axis
     ax = axes2[0]
     for i, (T_arr, col, lbl) in enumerate(zip(T_out_lits_t, COLORS_LITS, LABELS_LITS)):
         T_arr = np.array(T_arr)
-        ax.plot(t, T_arr, color=col, lw=1.8, label=lbl)
-    _dyn_style_ax(ax, title='T sortie par couche catalytique (°C)',
-                  xlabel='Temps (s)', ylabel='Température (°C)')
-    ax.legend(fontsize=9, facecolor=DYN_PANEL, edgecolor=DYN_GRID,
+        ax.plot(t, T_arr, color=col, lw=1.6, label=lbl)
+    _dyn_style_ax(ax, title='Outlet temperature per catalytic bed (°C)',
+                  xlabel='Time (s)', ylabel='Temperature (°C)')
+    ax.legend(fontsize=8, facecolor=DYN_PANEL, edgecolor=DYN_GRID,
               labelcolor=DYN_WHITE, loc='upper right', ncol=2)
-    _add_echelon_line(ax, t_echelon)
+    _add_step_line(ax, t_step)
 
+    # Graph B: Absorption efficiencies JD02 / JD03 vs time
     ax = axes2[1]
     eff_jd02 = np.array(hist.get('eff_jd02', []))
     eff_jd03 = np.array(hist.get('eff_jd03', []))
-    ax.plot(t, eff_jd02, color=DYN_CYAN,   lw=1.8, label='η JD02 inter')
-    ax.plot(t, eff_jd03, color=DYN_ORANGE, lw=1.8, label='η JD03 final')
+    ax.plot(t, eff_jd02, color=DYN_CYAN,   lw=1.6, label='η JD02 inter')
+    ax.plot(t, eff_jd03, color=DYN_ORANGE, lw=1.6, label='η JD03 final')
     ax.fill_between(t, eff_jd02, eff_jd03, alpha=0.08, color=DYN_WHITE)
-    _dyn_style_ax(ax, title='Efficacité absorption JD02 / JD03 (%)',
-                  xlabel='Temps (s)', ylabel='η (%)')
-    ax.legend(fontsize=9, facecolor=DYN_PANEL, edgecolor=DYN_GRID,
+    _dyn_style_ax(ax, title='Absorption efficiency JD02 / JD03 (%)',
+                  xlabel='Time (s)', ylabel='η (%)')
+    ax.legend(fontsize=8, facecolor=DYN_PANEL, edgecolor=DYN_GRID,
               labelcolor=DYN_WHITE, loc='lower right')
-    _add_echelon_line(ax, t_echelon)
+    _add_step_line(ax, t_step)
 
-    b64_2 = _fig_to_b64(fig2, dpi=140)
+    b64_2 = _fig_to_b64(fig2)
     st.markdown(
         f'<img src="data:image/png;base64,{b64_2}" '
-        f'style="width:100%;border-radius:4px;margin-bottom:10px;" />',
+        f'style="width:100%;border-radius:4px;margin-bottom:8px;" />',
         unsafe_allow_html=True)
 
     # ══════════════════════════════════════════════════════════════
-    # SECTION 3 — Profils spatiaux convertisseur (axe z)
+    # SECTION 3 — Converter spatial profiles (z-axis)
     # ══════════════════════════════════════════════════════════════
     st.markdown(
         '<div style="color:#00FF88;font-family:\'Courier New\',monospace;'
-        'font-size:13px;font-weight:bold;border-left:3px solid #00FF88;'
-        'padding-left:12px;margin:12px 0 8px 0;">3 — PROFILS SPATIAUX — CONVERTISSEUR (axe z)</div>',
+        'font-size:12px;font-weight:bold;border-left:3px solid #00FF88;'
+        'padding-left:10px;margin:10px 0 6px 0;">3 — SPATIAL PROFILES — CONVERTER (z-axis)</div>',
         unsafe_allow_html=True)
 
     if profils:
-        # figsize agrandi : (20, 6) au lieu de (18, 5)
-        fig3, axes3 = _dyn_fig(1, 3, figsize=(20, 6))
+        fig3, axes3 = _dyn_fig(1, 3, figsize=(18, 5))
 
         ax_T   = axes3[0]
         ax_tau = axes3[1]
@@ -736,14 +645,14 @@ def render_page_dynamique(results):
 
             z_plot = z + z_offset
 
-            ax_T.plot(z_plot, T_C, color=col, lw=2.0, label=lbl)
+            ax_T.plot(z_plot, T_C, color=col, lw=1.8, label=lbl)
             ax_T.fill_between(z_plot, T_C, alpha=0.08, color=col)
 
-            ax_tau.plot(z_plot, tau, color=col, lw=2.0, label=lbl)
+            ax_tau.plot(z_plot, tau, color=col, lw=1.8, label=lbl)
 
             if len(r) > 0:
                 r_norm = r / (np.max(np.abs(r)) + 1e-20)
-                ax_r.plot(z_plot, r_norm, color=col, lw=2.0, label=lbl)
+                ax_r.plot(z_plot, r_norm, color=col, lw=1.8, label=lbl)
 
             if i < len(profils) - 1:
                 z_offset_end = z_plot[-1]
@@ -751,37 +660,38 @@ def render_page_dynamique(results):
 
             z_offset = z_plot[-1] + 0.3
 
+        # Bed separation lines
         for ax_ in [ax_T, ax_tau, ax_r]:
             for zl in lim_z:
                 ax_.axvline(x=zl + 0.15, color=DYN_GRAY, lw=1.0,
                             linestyle=':', alpha=0.6)
 
-        _dyn_style_ax(ax_T,   title='Profil T(z) par couche catalytique',
-                      xlabel='Position axiale (m)', ylabel='Température (°C)')
-        _dyn_style_ax(ax_tau, title='Profil τ(z) — Taux de conversion (%)',
-                      xlabel='Position axiale (m)', ylabel='τ (%)')
-        _dyn_style_ax(ax_r,   title='Profil r(z) normalisé — Vitesse réaction',
-                      xlabel='Position axiale (m)', ylabel='r normalisée (-)')
+        _dyn_style_ax(ax_T,   title='T(z) profile per catalytic bed',
+                      xlabel='Axial position (m)', ylabel='Temperature (°C)')
+        _dyn_style_ax(ax_tau, title='τ(z) profile — Conversion rate (%)',
+                      xlabel='Axial position (m)', ylabel='τ (%)')
+        _dyn_style_ax(ax_r,   title='Normalized r(z) — Reaction rate',
+                      xlabel='Axial position (m)', ylabel='Normalized r (-)')
 
         for ax_ in [ax_T, ax_tau, ax_r]:
-            ax_.legend(fontsize=8, facecolor=DYN_PANEL, edgecolor=DYN_GRID,
+            ax_.legend(fontsize=7.5, facecolor=DYN_PANEL, edgecolor=DYN_GRID,
                        labelcolor=DYN_WHITE, loc='best', ncol=2)
 
-        b64_3 = _fig_to_b64(fig3, dpi=140)
+        b64_3 = _fig_to_b64(fig3)
         st.markdown(
             f'<img src="data:image/png;base64,{b64_3}" '
-            f'style="width:100%;border-radius:4px;margin-bottom:10px;" />',
+            f'style="width:100%;border-radius:4px;margin-bottom:8px;" />',
             unsafe_allow_html=True)
     else:
-        st.info("Profils spatiaux non disponibles (données 'profils_lits' absentes).")
+        st.info("Spatial profiles not available ('profils_lits' data missing).")
 
     # ══════════════════════════════════════════════════════════════
-    # SECTION 4 — Profils four & chaudière
+    # SECTION 4 — Furnace & boiler thermal profiles
     # ══════════════════════════════════════════════════════════════
     st.markdown(
         '<div style="color:#00FF88;font-family:\'Courier New\',monospace;'
-        'font-size:13px;font-weight:bold;border-left:3px solid #00FF88;'
-        'padding-left:12px;margin:12px 0 8px 0;">4 — PROFILS THERMIQUES — FOUR &amp; CHAUDIÈRE</div>',
+        'font-size:12px;font-weight:bold;border-left:3px solid #00FF88;'
+        'padding-left:10px;margin:10px 0 6px 0;">4 — THERMAL PROFILES — FURNACE & BOILER</div>',
         unsafe_allow_html=True)
 
     z_four_p = four.get('z_profil', [])
@@ -791,77 +701,80 @@ def render_page_dynamique(results):
     T_BFW_chaud  = chaud.get('T_BFW_profil', [])
 
     if z_four_p and z_chaud_p:
-        # figsize agrandi : (20, 6) au lieu de (18, 5)
-        fig4, axes4 = _dyn_fig(1, 2, figsize=(20, 6))
+        fig4, axes4 = _dyn_fig(1, 2, figsize=(18, 5))
 
+        # Furnace T profile
         ax = axes4[0]
-        ax.plot(z_four_p, T_four_p, color=DYN_ORANGE, lw=2.2, label='T gaz four')
+        ax.plot(z_four_p, T_four_p, color=DYN_ORANGE, lw=2.0, label='Furnace gas T')
         ax.fill_between(z_four_p, T_four_p, alpha=0.12, color=DYN_ORANGE)
+        # Flame temperature annotation
         idx_max = int(np.argmax(T_four_p))
         T_max   = float(np.max(T_four_p))
-        ax.annotate(f'T_flamme\n{T_max:.0f} °C',
+        ax.annotate(f'Flame T\n{T_max:.0f} °C',
                     xy=(z_four_p[idx_max], T_max),
                     xytext=(z_four_p[idx_max] + 0.05, T_max - 80),
-                    color=DYN_YELLOW, fontsize=8, fontfamily='monospace',
+                    color=DYN_YELLOW, fontsize=7.5, fontfamily='monospace',
                     arrowprops=dict(arrowstyle='->', color=DYN_YELLOW, lw=1.0))
         eta = four.get('eta_combustion', 0.0)
-        ax.set_title(f'Profil T four 401AF01 — η comb. = {eta:.1f} %',
-                     fontsize=10, fontweight='bold', fontfamily='monospace', color=DYN_GREEN)
-        _dyn_style_ax(ax, xlabel='Position normalisée (z/L)',
-                      ylabel='Température (°C)')
-        ax.legend(fontsize=9, facecolor=DYN_PANEL, edgecolor=DYN_GRID,
+        ax.set_title(f'Furnace 401AF01 T profile — η comb. = {eta:.1f} %',
+                     fontsize=9, fontweight='bold', fontfamily='monospace', color=DYN_GREEN)
+        _dyn_style_ax(ax, xlabel='Normalized position (z/L)',
+                      ylabel='Temperature (°C)')
+        ax.legend(fontsize=8, facecolor=DYN_PANEL, edgecolor=DYN_GRID,
                   labelcolor=DYN_WHITE, loc='upper right')
 
+        # Boiler T profile (gas + BFW)
         ax = axes4[1]
-        ax.plot(z_chaud_p, T_gaz_chaud, color=DYN_RED,  lw=2.2, label='T gaz (côté coque)')
-        ax.plot(z_chaud_p, T_BFW_chaud, color=DYN_CYAN, lw=2.2, label='T BFW/vapeur')
+        ax.plot(z_chaud_p, T_gaz_chaud, color=DYN_RED,  lw=2.0, label='Gas T (shell side)')
+        ax.plot(z_chaud_p, T_BFW_chaud, color=DYN_CYAN, lw=2.0, label='BFW/Steam T')
         ax.fill_between(z_chaud_p, T_gaz_chaud, T_BFW_chaud,
                         alpha=0.08, color=DYN_WHITE, label='Pinch zone')
         eta_ch = chaud.get('eta_chaudiere', 0.0)
-        ax.set_title(f'Profil T chaudière 401AV01 — η = {eta_ch:.1f} %',
-                     fontsize=10, fontweight='bold', fontfamily='monospace', color=DYN_GREEN)
-        _dyn_style_ax(ax, xlabel='Position normalisée (z/L)',
-                      ylabel='Température (°C)')
-        ax.legend(fontsize=9, facecolor=DYN_PANEL, edgecolor=DYN_GRID,
+        ax.set_title(f'Boiler 401AV01 T profile — η = {eta_ch:.1f} %',
+                     fontsize=9, fontweight='bold', fontfamily='monospace', color=DYN_GREEN)
+        _dyn_style_ax(ax, xlabel='Normalized position (z/L)',
+                      ylabel='Temperature (°C)')
+        ax.legend(fontsize=8, facecolor=DYN_PANEL, edgecolor=DYN_GRID,
                   labelcolor=DYN_WHITE, loc='best')
 
-        b64_4 = _fig_to_b64(fig4, dpi=140)
+        b64_4 = _fig_to_b64(fig4)
         st.markdown(
             f'<img src="data:image/png;base64,{b64_4}" '
-            f'style="width:100%;border-radius:4px;margin-bottom:10px;" />',
+            f'style="width:100%;border-radius:4px;margin-bottom:8px;" />',
             unsafe_allow_html=True)
     else:
-        st.info("Profils thermiques four/chaudière non disponibles.")
+        st.info("Furnace/boiler thermal profiles not available.")
 
     # ══════════════════════════════════════════════════════════════
-    # SECTION 5 — Bilan taux de conversion par lit (barres)
+    # SECTION 5 — Conversion rate per bed (bar chart)
     # ══════════════════════════════════════════════════════════════
     st.markdown(
         '<div style="color:#00FF88;font-family:\'Courier New\',monospace;'
-        'font-size:13px;font-weight:bold;border-left:3px solid #00FF88;'
-        'padding-left:12px;margin:12px 0 8px 0;">5 — BILAN DE CONVERSION &amp; PERTES DE CHARGE PAR COUCHE</div>',
+        'font-size:12px;font-weight:bold;border-left:3px solid #00FF88;'
+        'padding-left:10px;margin:10px 0 6px 0;">5 — CONVERSION BALANCE & PRESSURE DROP PER BED</div>',
         unsafe_allow_html=True)
 
     tau_lits = conv.get('tau_lits', [])
     dp_lits  = conv.get('dp_lits',  [])
 
     if tau_lits and dp_lits:
-        # figsize agrandi : (16, 6) au lieu de (14, 5)
-        fig5, axes5 = _dyn_fig(1, 2, figsize=(16, 6))
+        fig5, axes5 = _dyn_fig(1, 2, figsize=(14, 5))
 
-        lits_labels = [f'Couche {i+1}' for i in range(len(tau_lits))]
+        lits_labels = [f'Bed {i+1}' for i in range(len(tau_lits))]
 
+        # τ bars per bed
         ax = axes5[0]
         bars = ax.bar(lits_labels, tau_lits, color=COLORS_LITS[:len(tau_lits)],
                       edgecolor=DYN_GRID, linewidth=0.8, width=0.55)
         for bar, val in zip(bars, tau_lits):
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.3,
                     f'{val:.2f}%', ha='center', va='bottom',
-                    color=DYN_WHITE, fontsize=10, fontweight='bold',
+                    color=DYN_WHITE, fontsize=8.5, fontweight='bold',
                     fontfamily='monospace')
-        _dyn_style_ax(ax, title='Taux de conversion cumulé par couche (%)',
-                      ylabel='τ cumulé (%)', ylim=(0, 105))
+        _dyn_style_ax(ax, title='Cumulative conversion rate per bed (%)',
+                      ylabel='Cumulative τ (%)', ylim=(0, 105))
 
+        # ΔP bars per bed
         ax = axes5[1]
         dp_vals = [dp for dp in dp_lits]
         bars2 = ax.bar(lits_labels, dp_vals, color=COLORS_LITS[:len(dp_lits)],
@@ -869,35 +782,30 @@ def render_page_dynamique(results):
         for bar, val in zip(bars2, dp_vals):
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
                     f'{val:.2f}', ha='center', va='bottom',
-                    color=DYN_WHITE, fontsize=10, fontweight='bold',
+                    color=DYN_WHITE, fontsize=8.5, fontweight='bold',
                     fontfamily='monospace')
-        _dyn_style_ax(ax, title='Perte de charge par couche catalytique (kPa)',
+        _dyn_style_ax(ax, title='Pressure drop per catalytic bed (kPa)',
                       ylabel='ΔP (kPa)')
 
-        b64_5 = _fig_to_b64(fig5, dpi=140)
+        b64_5 = _fig_to_b64(fig5)
         st.markdown(
             f'<img src="data:image/png;base64,{b64_5}" '
-            f'style="width:100%;border-radius:4px;margin-bottom:10px;" />',
+            f'style="width:100%;border-radius:4px;margin-bottom:8px;" />',
             unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════
-# FIGURES — VUES PROCESS
+# FIGURES — PROCESS VIEWS (unchanged logic)
 # ══════════════════════════════════════════════════════════════════════
 
 def draw_flowsheet(results, S_kgm, Air_nm3h, T_air, T_s, ratio_p,
                    turbo_res, dry_res, filter_res, tank_sys):
-    # ── v5 : xlim élargi (30 -> 31) pour ne plus couper l'horodatage,
-    #          title bar agrandie en conséquence ──────────────────────
-    fig, ax = plt.subplots(figsize=(34, 17))
-    unisim_bg(fig, ax, xlim=(-2, 31), ylim=(-2.5, 11.5))
-    draw_title_bar(ax, 'SUPERVISION UNISIM-DESIGN — SULFURIC ACID PLANT — GLOBAL PROCESS',
-                   xlim=33, ylim=11.5)
+    fig, ax = plt.subplots(figsize=(32, 15))
+    unisim_bg(fig, ax, xlim=(-2, 30), ylim=(-2.5, 11.5))
+    draw_title_bar(ax, 'UNISIM-DESIGN SUPERVISION — SULFURIC ACID PLANT — GLOBAL PROCESS',
+                   xlim=32, ylim=11.5)
 
     DY = -0.8
-    # ── v5 : offset vertical standardisé pour toutes les data_box
-    #          annexes de la rangée du bas (filtre / tour séchage / turbo)
-    Y_OFFSET_BOX = -1.65
 
     st1 = tank_sys.sulfur_tank_1.state
     st2 = tank_sys.sulfur_tank_2.state
@@ -912,19 +820,19 @@ def draw_flowsheet(results, S_kgm, Air_nm3h, T_air, T_s, ratio_p,
                                facecolor='#CCCCAA', edgecolor='#AA9900',
                                lw=1.5, alpha=0.5, zorder=1))
     ax.text(0.62, CY_BAC + BAC_H / 2 + 0.52,
-            'STOCKAGE SOUFRE', color='#AA6600', fontsize=7.5, fontweight='bold',
+            'SULFUR STORAGE', color='#AA6600', fontsize=7.5, fontweight='bold',
             ha='center', fontfamily='monospace', zorder=8)
 
     alarm_s1 = st1.get('solidification_risk', False) or st1.get('overheat_risk', False)
     alarm_s2 = st2.get('solidification_risk', False) or st2.get('overheat_risk', False)
 
     draw_tank_unisim(ax, CX_S1, CY_BAC, BAC_W, BAC_H,
-                     'BAC S1', st1.get('tag', '401AS01'),
+                     'TANK S1', st1.get('tag', '401AS01'),
                      st1['level_pct'], st1['T_C'], st1['density_kg_m3'],
                      '#DDCC00', alarm=alarm_s1,
                      extra=[(f"{st1['mass_kg']/1000:.2f}", "t")])
-    draw_tank_unisim(ax, CX_S2+0.5, CY_BAC, BAC_W, BAC_H,
-                     'BAC S2', st2.get('tag', '401AS02'),
+    draw_tank_unisim(ax, CX_S2, CY_BAC, BAC_W, BAC_H,
+                     'TANK S2', st2.get('tag', '401AS02'),
                      st2['level_pct'], st2['T_C'], st2['density_kg_m3'],
                      '#DDCC00', alarm=alarm_s2,
                      extra=[(f"{st2['mass_kg']/1000:.2f}", "t")])
@@ -939,95 +847,90 @@ def draw_flowsheet(results, S_kgm, Air_nm3h, T_air, T_s, ratio_p,
     ax.text(CX_FIL, CY_FIL - 0.62, 'AIR FILTER\n401AS02',
             color='#111', fontsize=6.5, fontweight='bold',
             ha='center', va='top', fontfamily='monospace', zorder=5)
-    data_box(ax, CX_FIL - 1, CY_FIL + Y_OFFSET_BOX, [
-        ("T out :", f"{filter_res.get('T_out', 30):.1f} °C"),
-        ("ΔP    :", f"{filter_res.get('delta_P_mmWC', 0):.2f} mmWC"),
-    ], w=1.90)
+    data_box(ax, CX_FIL, CY_FIL - 1.5, [
+        (f"{filter_res.get('T_out', 30):.2f}", "°C"),
+        (f"{filter_res.get('delta_P_mmWC', 0):.2f}", "mmWC"),
+    ], w=1.55)
     pipe(ax, CX_FIL - 1.50, CY_FIL, CX_FIL - 0.38, CY_FIL,
-         color=C_AIR, lw=2.5, )
+         color=C_AIR, lw=2.5, tag='F-AIR')
 
     CX_DT = 3.80; CY_DT = 2.0 + DY; DT_W = 0.90; DT_H = 1.55
     draw_absorption_tower_unisim(ax, CX_DT, CY_DT + 0.4, DT_W, DT_H,
-                                 'TOUR DE\nSECHAGE', '401AD02')
+                                 'DRYING\nTOWER', '401AD02')
     pipe(ax, CX_FIL + 0.38, CY_FIL, CX_DT - DT_W / 2, CY_DT,
-         color=C_AIR, lw=2.5)
+         color=C_AIR, lw=2.5, tag='F110')
     pipe(ax, CX_DT, CY_DT + DT_H / 2 + 0.30, CX_DT, CY_DT + DT_H / 2,
-         color=C_ACID_VIOLET, lw=2.0)
-    data_box(ax, CX_DT + 0.15, CY_DT + Y_OFFSET_BOX, [
-        ("T gaz :", f"{dry_res.get('TG_out', T_air):.1f} °C"),
-        ("η     :", f"{dry_res.get('eff', 0):.2f} %"),
-        ("H2O   :", f"{dry_res.get('w_gNm3', 0):.4f} g/Nm³"),
-    ], w=2.00)
+         color=C_ACID_VIOLET, lw=2.0, tag='F119')
+    data_box(ax, CX_DT + 0.55, CY_DT - 1.4, [
+        (f"{dry_res.get('TG_out', T_air):.2f}", "°C gas"),
+        (f"{dry_res.get('eff', 0):.2f}", "% eff"),
+        (f"{dry_res.get('w_gNm3', 0):.4f}", "g/Nm³"),
+    ], w=1.60)
 
     CX_TB = 6.80; CY_TB = 2.0 + DY; R_TB = 0.75
     draw_compressor_unisim(ax, CX_TB, CY_TB, R_TB,
-                           title='TURBOSOUFFLANTE', tag='401AC01/02')
+                           title='TURBO BLOWER', tag='401AC01/02')
     pipe(ax, CX_DT + DT_W / 2, CY_DT, CX_TB - R_TB, CY_TB,
-         color=C_AIR, lw=3.0)
-    data_box(ax, CX_TB + R_TB + 0.10, CY_TB - 0.50, [
-        ("N     :", f"{turbo_res.get('N_rpm', 0):.0f} rpm"),
-        ("ΔP    :", f"{turbo_res.get('delta_P_mmCE', 0):.1f} mmCE"),
-        ("W     :", f"{turbo_res.get('W_shaft_kW', 0):.1f} kW"),
-        ("Surge :", f"{turbo_res.get('surge_margin_pct', 0):.1f} %"),
-        ("T out :", f"{turbo_res.get('T_out_C', 0):.1f} °C"),
-        ("Q air :", f"{Air_nm3h:.0f} Nm³/h"),
-    ], w=2.10)
+         color=C_AIR, lw=3.0, tag='F111')
+    data_box(ax, CX_TB + R_TB + 0.10, CY_TB - 0.14, [
+        (f"{turbo_res.get('N_rpm', 0):.2f}", "rpm"),
+        (f"{turbo_res.get('delta_P_mmCE', 0):.2f}", "mmCE"),
+        (f"{turbo_res.get('W_shaft_kW', 0):.2f}", "kW"),
+        (f"{turbo_res.get('surge_margin_pct', 0):.2f}", "% surge"),
+        (f"{turbo_res.get('T_out_C', 0):.2f}", "°C"),
+        (f"{Air_nm3h:.2f}", "Nm³/h")
+    ], w=1.65)
 
     CX_FOUR = 11.0; CY_FOUR = 5.2 + DY; FOUR_W = 3.5; FOUR_H = 1.55
     cylinder_3d(ax, CX_FOUR, CY_FOUR, FOUR_W, FOUR_H,
                 label='SULFUR BURNER', tag='401AF01', horizontal=True)
 
-    pipe(ax, CX_S2 + BAC_W / 2 + 1.25, CY_BAC, CX_FOUR - FOUR_W / 2, CY_FOUR + 0.35,
+    pipe(ax, CX_S2 + BAC_W / 2 + 1.65, CY_BAC, CX_FOUR - FOUR_W / 2, CY_FOUR + 0.35,
          color=C_SULFUR_ORG, lw=3.0, tag='F9')
-    data_box(ax, 3.5, 4.50 + DY, [
-        ("Q S   :", f"{S_kgm:.1f} kg/min"),
-        ("T S   :", f"{T_s:.1f} °C"),
-    ], w=1.90)
-    ax.text(3.5, 5.75 + DY, 'SOUFRE\nLIQUIDE', color="#E8E537",
+    data_box(ax, 1.85, 4.50 + DY, [
+        (f"{S_kgm:.2f}\n", "kg/min S"),
+        (f"{T_s:.2f}", "°C"),
+    ], w=1.60)
+    ax.text(2.65, 5.25 + DY, 'LIQUID\nSULFUR', color="#E8E537",
             fontsize=7.5, fontweight='bold', ha='center', fontfamily='monospace', zorder=8)
 
     pipe(ax, CX_TB, CY_TB + R_TB + 0.80, CX_TB, CY_TB + R_TB,
          color=C_AIR, lw=3.0, arrow=False)
     pipe(ax, CX_TB, CY_TB + R_TB + 0.80, CX_FOUR - FOUR_W / 2, CY_FOUR,
-         color=C_AIR, lw=3.0)
+         color=C_AIR, lw=3.0, tag='F112')
 
-    # ── v5 : data_box four déplacée légèrement plus haut et resserrée
-    #          pour ne pas déborder du cadre supérieur ─────────────────
-    data_box(ax, CX_FOUR - 0.85, CY_FOUR + FOUR_H / 2 + 0.18, [
-        ("SO2   :", f"{results['four']['SO2_pct']:.2f} %"),
-        ("O2    :", f"{results['four']['O2_pct']:.2f} %"),
-        ("T out :", f"{results['four']['T_out']:.1f} °C"),
-        ("T fl. :", f"{results['four'].get('T_flamme', 0):.1f} °C"),
-    ], w=1.90)
+    data_box(ax, CX_FOUR - 0.70, CY_FOUR + FOUR_H / 2 + 0.12, [
+        (f"{results['four']['SO2_pct']:.2f}", "% SO₂"),
+        (f"{results['four']['O2_pct']:.2f}", "% O₂"),
+        (f"{results['four']['T_out']:.2f}", "°C out"),
+        (f"{results['four'].get('T_flamme', 0):.2f}", "°C fl."),
+    ], w=1.65)
 
     CX_CHAUD = 16.0; CY_CHAUD = 5.2 + DY; CHAUD_W = 4.0; CHAUD_H = 1.80
     cylinder_3d(ax, CX_CHAUD, CY_CHAUD, CHAUD_W, CHAUD_H,
                 label='WASTE HEAT BOILER', tag='401AV01', horizontal=True)
 
     pipe(ax, CX_FOUR + FOUR_W / 2, CY_FOUR, CX_CHAUD - CHAUD_W / 2, CY_CHAUD,
-         color=C_GAZ_JAUNE, lw=4.0, )
+         color=C_GAZ_JAUNE, lw=4.0, tag='F-GAS')
 
-    
+    pipe(ax, CX_CHAUD, CY_CHAUD + CHAUD_H / 2, CX_CHAUD, CY_CHAUD + CHAUD_H / 2 + 0.8,
+         color=C_STEAM_RED, lw=2.5, tag='F-STM')
+    data_box(ax, CX_CHAUD + CHAUD_W / 2 - 2.10, CY_CHAUD - 2.20, [
+        (f"{results['chaudiere']['T_out']:.2f}\n", "°C out"),
+        (f"{results['chaudiere']['steam_flow']:.2f}\n", "t/h stm"),
+        (f"{results['chaudiere']['power_mw']:.2f}\n", "MW"),
+        (f"{results['chaudiere']['bypass_pct']:.2f}\n", "% bypass"),
+    ], w=1.70)
 
-    # ── v5 : data_box chaudière décalée vers la droite pour ne plus
-    #          chevaucher le tuyau F-VAP ────────────────────────────────
-    data_box(ax, CX_CHAUD + CHAUD_W / 2 - 1.50, CY_CHAUD - 2.35, [
-        ("T out :", f"{results['chaudiere']['T_out']:.1f} °C"),
-        ("Vap.  :", f"{results['chaudiere']['steam_flow']:.1f} t/h"),
-        ("Puis. :", f"{results['chaudiere']['power_mw']:.2f} MW"),
-        ("Bypas :", f"{results['chaudiere']['bypass_pct']:.1f} %"),
-    ], w=2.00)
+    pipe(ax, CX_CHAUD, CY_CHAUD - CHAUD_H / 2 - 0.6, CX_CHAUD, CY_CHAUD - CHAUD_H / 2,
+         color=C_WATER_BLUE, lw=2.0, tag='F-BFW')
 
-   
-
-    # ── v5 : GAP augmenté (1.55 -> 1.75) pour mieux répartir les 4 lits
-    #          sur la hauteur disponible et laisser de la place aux boîtes
-    CX_LITS = 23.0; LIT_W = 2.2; LIT_H = 0.80; GAP = 1.75
+    CX_LITS = 23.0; LIT_W = 2.2; LIT_H = 0.80; GAP = 1.55
     Y_LIT4 = 9.2 + DY; Y_LIT3 = Y_LIT4 - GAP
     Y_LIT2 = Y_LIT3 - GAP; Y_LIT1 = Y_LIT2 - GAP
 
     pipe(ax, CX_CHAUD + CHAUD_W / 2, CY_CHAUD, CX_LITS - LIT_W / 2, Y_LIT1,
-         color=C_GAZ_JAUNE, lw=3.5, )
+         color=C_GAZ_JAUNE, lw=3.5, tag='F-B1IN')
 
     dp_lits = results.get('convertisseur', {}).get('dp_lits', [1.69, 1.75, 2.14, 1.90])
     for bed_idx, (Y_LIT, bed_num) in enumerate([(Y_LIT1, 1), (Y_LIT2, 2),
@@ -1042,49 +945,49 @@ def draw_flowsheet(results, S_kgm, Air_nm3h, T_air, T_s, ratio_p,
         pipe(ax, CX_LITS, ya + LIT_H / 2, CX_LITS, yb - LIT_H / 2,
              color=C_GAZ_JAUNE, lw=2.5, arrow=True)
 
-    CX_JD02 = 25.7; TOUR_W = 0.85; TOUR_H = 1.15
+    CX_JD02 = 25.5; TOUR_W = 0.85; TOUR_H = 1.15
     pipe(ax, CX_LITS + LIT_W / 2, Y_LIT3, CX_JD02 - TOUR_W / 2, Y_LIT3,
-         color=C_GAZ_JAUNE, lw=2.5, )
+         color=C_GAZ_JAUNE, lw=2.5, tag='F-B3OUT')
     draw_absorption_tower_unisim(ax, CX_JD02, Y_LIT3, TOUR_W, TOUR_H,
                                  'JD02\nINTER', '401AJ02')
     jd02 = results.get('jd02', {})
-    data_box(ax, CX_JD02 + TOUR_W / 2 + 0.10, Y_LIT3 - 0.35, [
-        ("T gaz :", f"{jd02.get('T_gas_out', 0):.1f} °C"),
-        ("η     :", f"{jd02.get('eff_abs', 0):.2f} %"),
-        ("SO3   :", f"{jd02.get('ppm_SO3_out', 0):.2f} ppm"),
-    ], w=2.00)
+    data_box(ax, CX_JD02 + TOUR_W / 2 + 0.08, Y_LIT3 - 0.28, [
+        (f"{jd02.get('T_gas_out', 0):.2f}", "°C gas"),
+        (f"{jd02.get('eff_abs', 0):.2f}", "% η"),
+        (f"{jd02.get('ppm_SO3_out', 0):.2f}", "ppm SO₃"),
+    ], w=1.60)
     pipe(ax, CX_JD02, Y_LIT3 + TOUR_H / 2 + 0.30, CX_JD02, Y_LIT3 + TOUR_H / 2,
-         color=C_ACID_VIOLET, lw=1.8, )
+         color=C_ACID_VIOLET, lw=1.8, tag='F-AIN2')
     pipe(ax, CX_JD02, Y_LIT3 - TOUR_H / 2, CX_JD02, Y_LIT3 - TOUR_H / 2 - 0.30,
-         color=C_ACID_VIOLET, lw=1.8, )
+         color=C_ACID_VIOLET, lw=1.8, tag='F-AOUT2')
 
     pipe(ax, CX_JD02, Y_LIT3 + TOUR_H / 2, CX_JD02, Y_LIT4,
-         color=C_AIR, lw=2.5)
+         color=C_AIR, lw=2.5, tag='F-B4IN')
     pipe(ax, CX_JD02, Y_LIT4, CX_LITS + LIT_W / 2, Y_LIT4, color=C_AIR, lw=2.5)
 
     CX_JD03 = 17.5
     pipe(ax, CX_LITS - LIT_W / 2, Y_LIT4, CX_JD03 + TOUR_W / 2, Y_LIT4,
-         color=C_GAZ_JAUNE, lw=2.5, )
+         color=C_GAZ_JAUNE, lw=2.5, tag='F-B4OUT')
     draw_absorption_tower_unisim(ax, CX_JD03, Y_LIT4, TOUR_W, TOUR_H,
                                  'JD03\nFINAL', '401AJ03')
     jd03 = results.get('jd03', {})
-    data_box(ax, CX_JD03 - TOUR_W / 2 - 2.15, Y_LIT4 - 0.35, [
-        ("T gaz :", f"{jd03.get('T_gas_out', 0):.1f} °C"),
-        ("η     :", f"{jd03.get('eff_abs', 0):.2f} %"),
-        ("SO3   :", f"{jd03.get('ppm_SO3_out', 0):.2f} ppm"),
-    ], w=2.00)
+    data_box(ax, CX_JD03 - TOUR_W / 2 - 1.70, Y_LIT4 - 0.28, [
+        (f"{jd03.get('T_gas_out', 0):.2f}", "°C gas"),
+        (f"{jd03.get('eff_abs', 0):.2f}", "% η"),
+        (f"{jd03.get('ppm_SO3_out', 0):.2f}", "ppm SO₃"),
+    ], w=1.60)
     pipe(ax, CX_JD03, Y_LIT4 + TOUR_H / 2 + 0.30, CX_JD03, Y_LIT4 + TOUR_H / 2,
-         color=C_ACID_VIOLET, lw=1.8, )
+         color=C_ACID_VIOLET, lw=1.8, tag='F-AIN3')
     pipe(ax, CX_JD03, Y_LIT4 - TOUR_H / 2, CX_JD03, Y_LIT4 - TOUR_H / 2 - 0.30,
-         color=C_ACID_VIOLET, lw=1.8, )
+         color=C_ACID_VIOLET, lw=1.8, tag='F-AOUT3')
     pipe(ax, CX_JD03, Y_LIT4 + TOUR_H / 2,
          CX_JD03, Y_LIT4 + TOUR_H / 2 + 0.55,
-         color=C_AIR, lw=2.5, )
+         color=C_AIR, lw=2.5, tag='F-STACK')
     ax.text(CX_JD03, Y_LIT4 + TOUR_H / 2 + 0.72,
-            '→ CHEMINÉE', color='#228822', fontsize=7.5, fontweight='bold',
+            '→ STACK', color='#228822', fontsize=7.5, fontweight='bold',
             ha='center', fontfamily='monospace', zorder=8)
 
-    CX_BAC_A = 28.7; CY_BAC_A = 2.5 + DY; BAC_AW = 1.0; BAC_AH = 1.80
+    CX_BAC_A = 27.5; CY_BAC_A = 2.5 + DY; BAC_AW = 1.0; BAC_AH = 1.80
     alarm_a = sta.get('overheat_risk', False) or sta.get('dilution_risk', False)
     ax.add_patch(FancyBboxPatch((CX_BAC_A - BAC_AW / 2 - 0.20, CY_BAC_A - BAC_AH / 2 - 0.45),
                                BAC_AW + 0.40, BAC_AH + 1.10,
@@ -1092,56 +995,55 @@ def draw_flowsheet(results, S_kgm, Air_nm3h, T_air, T_s, ratio_p,
                                facecolor='#BBCCBB', edgecolor='#336633',
                                lw=1.5, alpha=0.5, zorder=1))
     ax.text(CX_BAC_A, CY_BAC_A + BAC_AH / 2 + 0.42,
-            'STOCKAGE ACIDE', color='#226622', fontsize=7.5, fontweight='bold',
+            'ACID STORAGE', color='#226622', fontsize=7.5, fontweight='bold',
             ha='center', fontfamily='monospace', zorder=8)
     draw_tank_unisim(ax, CX_BAC_A, CY_BAC_A, BAC_AW, BAC_AH,
-                     'BAC ACIDE', sta.get('tag', '401AA01'),
+                     'ACID TANK', sta.get('tag', '401AA01'),
                      sta['level_pct'], sta['T_C'], sta['density_kg_m3'],
                      '#9933CC', alarm=alarm_a,
                      extra=[(f"{tank_sys.total_acid_mass_t:.2f}", "t")])
 
     draw_pump_unisim(ax, CX_BAC_A, CY_BAC_A - BAC_AH / 2 - 0.55,
-                     R=0.18, color='#DDDD33', label='POMPE', tag='401AP01')
+                     R=0.18, color='#DDDD33', label='PUMP', tag='401AP01')
     pipe(ax, CX_BAC_A, CY_BAC_A - BAC_AH / 2,
          CX_BAC_A, CY_BAC_A - BAC_AH / 2 - 0.37, color=C_ACID_VIOLET, lw=2.0)
     pipe(ax, CX_BAC_A, CY_BAC_A - BAC_AH / 2 - 0.73,
          CX_BAC_A, CY_BAC_A - BAC_AH / 2 - 1.05, color=C_ACID_VIOLET, lw=2.0)
     ax.text(CX_BAC_A, CY_BAC_A - BAC_AH / 2 - 1.12,
-            '→ EXPÉDITION', color='#552288', fontsize=7, fontweight='bold',
+            '→ DISPATCH', color='#552288', fontsize=7, fontweight='bold',
             ha='center', fontfamily='monospace', zorder=8)
 
     pipe(ax, CX_JD02, Y_LIT3 - TOUR_H / 2 - 0.30,
-         CX_BAC_A - BAC_AW / 2, CY_BAC_A, color=C_ACID_VIOLET, lw=1.8,)
+         CX_BAC_A - BAC_AW / 2, CY_BAC_A, color=C_ACID_VIOLET, lw=1.8, tag='F-RET2')
     pipe(ax, CX_JD03, Y_LIT4 - TOUR_H / 2 - 0.30,
-         CX_BAC_A - BAC_AW / 2, CY_BAC_A + 0.20, color=C_ACID_VIOLET, lw=1.8,)
+         CX_BAC_A - BAC_AW / 2, CY_BAC_A + 0.20, color=C_ACID_VIOLET, lw=1.8, tag='F-RET3')
 
     draw_pump_unisim(ax, CX_DT + DT_W / 2 + 0.55, CY_DT + DT_H / 2 + 0.55,
                      R=0.15, color='#3366CC', label='', tag='401AP02')
     pipe(ax, CX_BAC_A - BAC_AW / 2, CY_BAC_A + 0.40,
          CX_DT + DT_W / 2 + 0.55, CY_DT + DT_H / 2 + 0.55,
-         color=C_ACID_VIOLET, lw=1.8)
+         color=C_ACID_VIOLET, lw=1.8, tag='F-ACID-DT')
     pipe(ax, CX_DT + DT_W / 2 + 0.55, CY_DT + DT_H / 2 + 0.40,
          CX_DT, CY_DT + DT_H / 2 + 0.30, color=C_ACID_VIOLET, lw=1.8)
 
-    # ── v5 : légende remontée et recentrée, sortie de la zone des bacs/four
     leg_items = [
-        (C_GAZ_JAUNE,   'Gaz process / SO₂ / SO₃'),
-        (C_AIR,         'Air sec'),
-        (C_WATER_BLUE,  'Eau / BFW'),
-        (C_STEAM_RED,   'Vapeur HP'),
-        (C_ACID_VIOLET, 'Acide H₂SO₄'),
-        (C_SULFUR_ORG,  'Soufre liquide'),
-        (C_SEA_WATER,   'Eau de mer'),
-        (C_CONDENSAT,   'Condensat'),
+        (C_GAZ_JAUNE,   'Process gas / SO₂ / SO₃'),
+        (C_AIR,         'Dry air'),
+        (C_WATER_BLUE,  'Water / BFW'),
+        (C_STEAM_RED,   'HP Steam'),
+        (C_ACID_VIOLET, 'H₂SO₄ Acid'),
+        (C_SULFUR_ORG,  'Liquid sulfur'),
+        (C_SEA_WATER,   'Sea water'),
+        (C_CONDENSAT,   'Condensate'),
     ]
-    leg_x0 = 10.50; leg_y0 = -2.20
+    leg_x0 = 9.90; leg_y0 = -2.50
     ax.add_patch(FancyBboxPatch((leg_x0 - 0.10, leg_y0 - 0.10),
                                6.0, len(leg_items) * 0.30 + 0.30,
                                boxstyle="round,pad=0.06",
                                facecolor='#DDDDDD', edgecolor='#888',
                                lw=1.0, alpha=0.85, zorder=8))
     ax.text(leg_x0 + 2.80, leg_y0 + len(leg_items) * 0.30 + 0.10,
-            'LÉGENDE FLUIDES', color='#111', fontsize=7.5, fontweight='bold',
+            'FLUID LEGEND', color='#111', fontsize=7.5, fontweight='bold',
             ha='center', fontfamily='monospace', zorder=9)
     for i, (c, label) in enumerate(leg_items):
         yleg = leg_y0 + i * 0.30
@@ -1150,7 +1052,7 @@ def draw_flowsheet(results, S_kgm, Air_nm3h, T_air, T_s, ratio_p,
         ax.text(leg_x0 + 0.65, yleg + 0.11, label, color='#111', fontsize=6.5,
                 va='center', fontfamily='monospace', zorder=10)
 
-    ax.text(29.50, -2.30, datetime.now().strftime('%d/%m/%Y  %H:%M:%S'),
+    ax.text(28.50, -2.30, datetime.now().strftime('%d/%m/%Y  %H:%M:%S'),
             color='#333', fontsize=7, fontfamily='monospace', zorder=10)
 
     return fig
@@ -1158,141 +1060,143 @@ def draw_flowsheet(results, S_kgm, Air_nm3h, T_air, T_s, ratio_p,
 
 def render_page_equipements(filter_res, dry_res, turbo_res, Air_nm3h,
                             fouling_hours, Q_acid, T_acid, P_air_kPa):
-    # Décalage vers la gauche (négatif = gauche, positif = droite)
-    dx = 2.3   # "un peu" à gauche
-
-    fig, ax = plt.subplots(figsize=(26, 11))
+    fig, ax = plt.subplots(figsize=(24, 10))
     unisim_bg(fig, ax, xlim=(0, 24), ylim=(0, 10))
-    draw_title_bar(ax, 'TRAITEMENT AIR — FILTRE / TOUR DE SECHAGE / TURBOSOUFFLANTE',
+    draw_title_bar(ax, 'AIR TREATMENT — FILTER / DRYING TOWER / TURBO BLOWER',
                    xlim=24, ylim=10)
 
-    # FILTRE
-    ax.add_patch(FancyBboxPatch((2.5 + dx, 4.0), 1.2, 1.6,
+    ax.add_patch(FancyBboxPatch((2.5, 4.0), 1.2, 1.6,
                                boxstyle="round,pad=0.06",
                                facecolor=METAL_MID, edgecolor=METAL_BORDER, lw=2.0, zorder=3))
     for i in range(-3, 4):
-        ax.plot([2.70 + dx, 3.50 + dx], [4.80 + i * 0.14, 4.80 - i * 0.14],
+        ax.plot([2.70, 3.50], [4.80 + i * 0.14, 4.80 - i * 0.14],
                 color='#6688AA', lw=1.2, zorder=4)
-    ax.text(3.10 + dx, 3.82, 'AIR FILTER\n401AS02', color='#111', fontsize=8,
+    ax.text(3.10, 3.82, 'AIR FILTER\n401AS02', color='#111', fontsize=8,
             fontweight='bold', ha='center', va='top', fontfamily='monospace', zorder=5)
 
-    pipe(ax, 0.50 + dx, 4.80, 2.50 + dx, 4.80, color=C_AIR, lw=3.0)
-    data_box(ax, 0.10 + dx, 5.10, [
-        ('AIR AMBIANT',),
-        ("T     :", f"30.0 °C"),
-        ("P     :", f"{P_air_kPa:.1f} kPa"),
-        ("Q     :", f"{Air_nm3h:.0f} Nm³/h"),
-    ], w=2.20, color=FG_DATA)
+    pipe(ax, 0.50, 4.80, 2.50, 4.80, color=C_AIR, lw=3.0, tag='F-AMB')
+    data_box(ax, 0.10, 5.10, [
+        ('AMBIENT AIR',),
+        (f"T={30:.2f}", "°C"),
+        (f"P={P_air_kPa:.2f}", "kPa"),
+        (f"Q={Air_nm3h:.2f}", "Nm³/h"),
+    ], w=2.10, color=FG_DATA)
 
-    pipe(ax, 3.70 + dx, 4.80, 7.50 + dx, 4.80, color=C_AIR, lw=3.0)
-    data_box(ax, 4.00 + dx, 5.10, [
-        ('AIR FILTRÉ',),
-        ("T out :", f"{filter_res.get('T_out', 30):.1f} °C"),
-        ("ΔP    :", f"{filter_res.get('delta_P_mmWC', 0):.2f} mmWC"),
-        ("Col.  :", f"{fouling_hours:.1f} h"),
-    ], w=2.30)
+    pipe(ax, 3.70, 4.80, 7.50, 4.80, color=C_AIR, lw=3.0, tag='F110')
+    data_box(ax, 4.00, 5.10, [
+        ('FILTERED AIR',),
+        (f"T={filter_res.get('T_out', 30):.2f}", "°C"),
+        (f"ΔP={filter_res.get('delta_P_mmWC', 0):.2f}", "mmWC"),
+        (f"Foul={fouling_hours:.2f}", "h"),
+    ], w=2.20)
 
-    # TOUR DE SÉCHAGE
-    draw_absorption_tower_unisim(ax, 8.20 + dx, 4.80, 1.0, 2.0,
-                                 'TOUR DE\nSECHAGE', '401AD02')
+    draw_absorption_tower_unisim(ax, 8.20, 4.80, 1.0, 2.0,
+                                 'DRYING\nTOWER', '401AD02')
 
-    pipe(ax, 8.20 + dx, 7.40, 8.20 + dx, 5.80, color=C_ACID_VIOLET, lw=2.0)
-    data_box(ax, 7.70 + dx, 6.60, [
+    pipe(ax, 8.20, 7.40, 8.20, 5.80, color=C_ACID_VIOLET, lw=2.0, tag='F119')
+    data_box(ax, 7.70, 6.60, [
         ('H₂SO₄ IN',),
-        ("T     :", f"{T_acid:.1f} °C"),
-        ("Q     :", f"{Q_acid:.1f} m³/h"),
-        ("w     :", "98.50 %"),
-    ], w=2.10)
-    pipe(ax, 8.20 + dx, 3.80, 8.20 + dx, 2.80, color=C_ACID_VIOLET, lw=2.0)
-    data_box(ax, 7.70 + dx, 1.60, [
+        (f"T={T_acid:.2f}", "°C"),
+        (f"Q={Q_acid:.2f}", "m³/h"),
+        ('w≈98.50', "%"),
+    ], w=2.00)
+    pipe(ax, 8.20, 3.80, 8.20, 2.80, color=C_ACID_VIOLET, lw=2.0, tag='F-ACIDOUT')
+    data_box(ax, 7.70, 1.70, [
         ('H₂SO₄ OUT',),
-        ("T out :", f"{dry_res.get('TL_out', T_acid):.1f} °C"),
-        ("η     :", f"{dry_res.get('eff', 0):.2f} %"),
-        ("w     :", f"{dry_res.get('w_H2SO4_in', 98.5):.2f} %"),
-    ], w=2.20)
+        (f"T={dry_res.get('TL_out', T_acid):.2f}", "°C"),
+        (f"Eff={dry_res.get('eff', 0):.2f}", "%"),
+        (f"w={dry_res.get('w_H2SO4_in', 98.5):.2f}", "%"),
+    ], w=2.10)
 
-    pipe(ax, 8.70 + dx, 4.80, 14.00 + dx, 4.80, color=C_AIR, lw=3.0)
-    data_box(ax, 9.50 + dx, 5.10, [
-        ('AIR SEC',),
-        ("T out :", f"{dry_res.get('TG_out', 30):.1f} °C"),
-        ("H2O   :", f"{dry_res.get('w_gNm3', 0):.4f} g/Nm³"),
-    ], w=2.20)
+    pipe(ax, 8.70, 4.80, 14.00, 4.80, color=C_AIR, lw=3.0, tag='F111')
+    data_box(ax, 9.50, 5.10, [
+        ('DRY AIR',),
+        (f"T={dry_res.get('TG_out', 30):.2f}", "°C"),
+        (f"H₂O={dry_res.get('w_gNm3', 0):.4f}", "g/Nm³"),
+    ], w=2.10)
 
-    # TURBOSOUFFLANTE
-    draw_compressor_unisim(ax, 15.0 + dx, 4.80, 1.0,
-                           title='TURBOSOUFFLANTE', tag='401AC01/02')
-    pipe(ax, 15.0 + dx, 5.80, 15.0 + dx, 7.20, color=C_AIR, lw=3.0)
-    data_box(ax, 14.80 + dx, 6.55, [
-        ('AIR COMPRIMÉ',),
-        ("T out :", f"{turbo_res.get('T_out_C', 0):.1f} °C"),
-        ("ΔP    :", f"{turbo_res.get('delta_P_mmCE', 0):.1f} mmCE"),
-        ("N     :", f"{turbo_res.get('N_rpm', 0):.0f} rpm"),
-        ("W     :", f"{turbo_res.get('W_shaft_kW', 0):.1f} kW"),
-        ("Surge :", f"{turbo_res.get('surge_margin_pct', 0):.1f} %"),
-    ], w=2.20)
-    pipe(ax, 15.0 + dx, 3.80, 15.0 + dx, 2.50, color='#CC8844', lw=1.8)
-    data_box(ax, 14.50 + dx, 1.90, [('LUBE OIL',), ('Circuit lubri.',)], w=2.10)
+    draw_compressor_unisim(ax, 15.0, 4.80, 1.0,
+                           title='TURBO BLOWER', tag='401AC01/02')
+    pipe(ax, 15.0, 5.80, 15.0, 7.20, color=C_AIR, lw=3.0, tag='F112')
+    data_box(ax, 15.50, 6.60, [
+        ('COMPRESSED AIR',),
+        (f"T={turbo_res.get('T_out_C', 0):.2f}", "°C"),
+        (f"ΔP={turbo_res.get('delta_P_mmCE', 0):.2f}", "mmCE"),
+        (f"N={turbo_res.get('N_rpm', 0):.2f}", "rpm"),
+        (f"W={turbo_res.get('W_shaft_kW', 0):.2f}", "kW"),
+        (f"Surge={turbo_res.get('surge_margin_pct', 0):.2f}", "%"),
+    ], w=2.10)
+    pipe(ax, 15.0, 3.80, 15.0, 2.50, color='#CC8844', lw=1.8, tag='F-OIL')
+    data_box(ax, 15.00, 2.00, [('LUBE OIL',), ('Lubrication circuit',)], w=2.00)
 
     return fig
 
 
 def render_page_four_chaudiere(results, S_kgm, T_s, Air_nm3h, T_air, turbo_res):
-    # figsize agrandi : (26, 11)
-    fig, ax = plt.subplots(figsize=(26, 11))
+    fig, ax = plt.subplots(figsize=(24, 10))
     unisim_bg(fig, ax, xlim=(0, 24), ylim=(0, 10))
-    draw_title_bar(ax, 'FOUR DE COMBUSTION & CHAUDIÈRE DE RÉCUPÉRATION — 401AF01 / 401AV01',
+    draw_title_bar(ax, 'COMBUSTION FURNACE & WASTE HEAT BOILER — 401AF01 / 401AV01',
                    xlim=24, ylim=10)
 
     cylinder_3d(ax, 7.0, 5.0, 4.5, 2.0, label='SULFUR BURNER', tag='401AF01', horizontal=True)
 
-    pipe(ax, 1.50, 3.80, 4.75, 4.60, color=C_SULFUR_ORG, lw=3.5)
-    data_box(ax, 0.10, 2.85, [
-        ('SOUFRE LIQUIDE',),
-        ("T     :", f"{T_s:.1f} °C"),
-        ("Q     :", f"{S_kgm:.1f} kg/min"),
-        ("Pur.  :", "99.90 %"),
-    ], w=2.30)
+    pipe(ax, 1.50, 3.80, 4.75, 4.60, color=C_SULFUR_ORG, lw=3.5, tag='F9')
+    data_box(ax, 0.10, 3.00, [
+        ('LIQUID SULFUR',),
+        (f"T={T_s:.2f}", "°C"),
+        (f"Q={S_kgm:.2f}", "kg/min"),
+        ('Purity≈99.90', "%"),
+    ], w=2.20)
 
-    pipe(ax, 7.0, 6.80, 7.0, 6.0, color=C_AIR, lw=3.0)
-    data_box(ax, 5.70, 6.90, [
-        ('AIR COMPRIMÉ SEC',),
-        ("T     :", f"{turbo_res.get('T_out_C', 0):.1f} °C"),
-        ("Q     :", f"{Air_nm3h:.0f} Nm³/h"),
-        ("ΔP    :", f"{turbo_res.get('delta_P_mmCE', 0):.1f} mmCE"),
-    ], w=2.40)
+    pipe(ax, 7.0, 6.80, 7.0, 6.0, color=C_AIR, lw=3.0, tag='F112')
+    data_box(ax, 7.50, 7.10, [
+        ('DRY COMPRESSED AIR',),
+        (f"T={turbo_res.get('T_out_C', 0):.2f}", "°C"),
+        (f"Q={Air_nm3h:.2f}", "Nm³/h"),
+        (f"ΔP={turbo_res.get('delta_P_mmCE', 0):.2f}", "mmCE"),
+    ], w=2.20)
 
-    pipe(ax, 9.25, 5.0, 12.20, 5.0, color=C_GAZ_JAUNE, lw=5.0)
-    data_box(ax, 10.10, 5.38, [
-        ("T out :", f"{results['four']['T_out']:.1f} °C"),
-        ("SO2   :", f"{results['four']['SO2_pct']:.2f} %"),
-        ("O2    :", f"{results['four']['O2_pct']:.2f} %"),
-        ("T fl. :", f"{results['four'].get('T_flamme', 0):.1f} °C"),
-    ], w=2.00)
+    pipe(ax, 9.25, 5.0, 12.20, 5.0, color=C_GAZ_JAUNE, lw=5.0, tag='F-GASB')
+    data_box(ax, 10.20, 5.40, [
+        (f"T={results['four']['T_out']:.2f}", "°C"),
+        (f"SO₂={results['four']['SO2_pct']:.2f}", "%"),
+        (f"O₂={results['four']['O2_pct']:.2f}", "%"),
+        (f"T_fl={results['four'].get('T_flamme', 0):.2f}", "°C"),
+    ], w=1.80)
+
+    z2 = results['four'].get('z_profil', [])
+    p2 = results['four'].get('T_profil', [])
+    if len(z2) > 1 and len(p2) > 1:
+        ax_ins = ax.inset_axes([0.28, 0.05, 0.14, 0.20])
+        ax_ins.plot(z2, p2, color=C_STEAM_RED, lw=1.2)
+        ax_ins.set_title('T(z) furnace [°C]', fontsize=5, color='#111')
+        ax_ins.tick_params(labelsize=4)
+        ax_ins.set_facecolor('#E8E8E8')
 
     cylinder_3d(ax, 16.0, 5.0, 5.0, 2.2, label='WASTE HEAT BOILER', tag='401AV01', horizontal=True)
     pipe(ax, 12.20, 5.0, 13.50, 5.0, color=C_GAZ_JAUNE, lw=5.0, arrow=False)
 
-    pipe(ax, 16.0, 6.10, 16.0, 8.20, color=C_STEAM_RED, lw=3.0)
-    data_box(ax, 15.60, 6.75, [
-        ('VAPEUR HP',),
-        ("T     :", "420.0 °C"),
-        ("P     :", "40.0 bar"),
-        ("Q     :", f"{results['chaudiere']['steam_flow']:.1f} t/h"),
-        ("Puis. :", f"{results['chaudiere']['power_mw']:.2f} MW"),
-    ], w=2.20)
+    pipe(ax, 16.0, 6.10, 16.0, 8.20, color=C_STEAM_RED, lw=3.0, tag='F-STM')
+    data_box(ax, 16.50, 7.80, [
+        ('HP STEAM',),
+        ('T≈420.00', "°C"),
+        ('P≈40.00', "bar"),
+        (f"Q={results['chaudiere']['steam_flow']:.2f}", "t/h"),
+        (f"P={results['chaudiere']['power_mw']:.2f}", "MW"),
+    ], w=2.10)
 
-    pipe(ax, 16.0, 2.20, 16.0, 3.90, color=C_WATER_BLUE, lw=2.5)
-    data_box(ax, 15.60, 1.80, [
-        ('EAU ALIM. BFW',),
-        ("T     :", "105.0 °C"),
-        ("P     :", "45.0 bar"),
-    ], w=2.20)
+    pipe(ax, 16.0, 2.20, 16.0, 3.90, color=C_WATER_BLUE, lw=2.5, tag='F-BFW')
+    data_box(ax, 16.50, 1.90, [
+        ('FEED WATER BFW',),
+        ('T≈105.00', "°C"),
+        ('P≈45.00', "bar"),
+    ], w=2.10)
 
-    pipe(ax, 18.50, 5.0, 21.50, 5.0, color=C_GAZ_JAUNE, lw=3.5)
-    data_box(ax, 19.40, 5.38, [
-        ("T out :", f"{results['chaudiere']['T_out']:.1f} °C"),
-        ("Bypas :", f"{results['chaudiere']['bypass_pct']:.1f} %"),
-    ], w=2.00)
+    pipe(ax, 18.50, 5.0, 21.50, 5.0, color=C_GAZ_JAUNE, lw=3.5, tag='F-CONV')
+    data_box(ax, 19.50, 5.40, [
+        (f"T={results['chaudiere']['T_out']:.2f}", "°C gas"),
+        (f"Bypass={results['chaudiere']['bypass_pct']:.2f}", "%"),
+    ], w=2.10)
     ax.text(21.70, 5.10, '→ CONV.', color='#335500', fontsize=8,
             fontweight='bold', ha='left', fontfamily='monospace', zorder=8)
 
@@ -1302,11 +1206,10 @@ def render_page_four_chaudiere(results, S_kgm, T_s, Air_nm3h, T_air, turbo_res):
 
 
 def render_page_conv_absorption(results, T_in_lits_user):
-    # --- Figure plus grande pour accueillir les textes agrandis ---
-    fig, ax = plt.subplots(figsize=(32, 18))          # taille augmentée
-    unisim_bg(fig, ax, xlim=(0, 28), ylim=(-1.0, 14.0))  # limites ajustées
-    draw_title_bar(ax, 'CONVERTISSEUR & TOURS D\'ABSORPTION — DÉTAIL DES FLUX',
-                   xlim=28, ylim=14.0)                # titre plus large
+    fig, ax = plt.subplots(figsize=(28, 14))
+    unisim_bg(fig, ax, xlim=(0, 26), ylim=(-0.5, 12.5))
+    draw_title_bar(ax, 'CONVERTER & ABSORPTION TOWERS — DETAILED FLOW SHEET',
+                   xlim=26, ylim=12.5)
 
     conv = results['convertisseur']
     jd02 = results.get('jd02', {})
@@ -1314,143 +1217,130 @@ def render_page_conv_absorption(results, T_in_lits_user):
 
     dp_lits = conv.get('dp_lits', [1.69, 1.75, 2.14, 1.90])
 
-    # --- Positions (légèrement décalées pour éviter les chevauchements) ---
-    CX_LITS = 14.0        # décalé à droite pour équilibrer
-    LIT_W   = 3.6         # lits plus larges
-    LIT_H   = 0.90
-    GAP     = 2.00        # espacement vertical augmenté
+    CX_LITS = 13.0
+    LIT_W   = 3.2
+    LIT_H   = 0.80
+    GAP     = 1.80
 
-    Y_LIT1  = 3.0
+    Y_LIT1  = 2.0
     Y_LIT2  = Y_LIT1 + GAP
     Y_LIT3  = Y_LIT2 + GAP
     Y_LIT4  = Y_LIT3 + GAP
 
-    CX_JD02 = 22.5        # tours décalées vers la droite
-    CX_JD03 = 5.5         # tour de gauche
-    TOUR_W  = 1.10
-    TOUR_H  = 1.60
+    CX_JD02 = 20.5
+    CX_JD03 = 5.5
+    TOUR_W  = 0.95
+    TOUR_H  = 1.40
 
     T_ins  = conv['T_in_lits']
     T_outs = conv['T_out_lits']
     taus   = conv['tau_lits']
 
-    tau_global = conv.get('tau_final_pct', 0.0)
-    t_sim      = conv.get('t_simule_s', 0.0)
+   
 
+    data_box(ax, CX_LITS - LIT_W / 2 - 5.80, Y_LIT1 - 0.40, [
+        ('INLET GAS',),
+        (f"T={T_in_lits_user[0]:.2f}", "°C"),
+        ('SO₂ + O₂ + N₂',),
+    ], w=2.60)
     
 
-             # trait plus épais
-
-    # --- Lit 1 ---
     draw_bed_unisim(ax, CX_LITS, Y_LIT1, LIT_W, LIT_H, 1,
                     T_ins[0], T_outs[0], taus[0], dp_kpa=dp_lits[0])
     pipe(ax, CX_LITS, Y_LIT1 + LIT_H / 2, CX_LITS, Y_LIT2 - LIT_H / 2,
-         color=C_GAZ_JAUNE, lw=4.0)
-
-    # --- Lit 2 ---
+         color=C_GAZ_JAUNE, lw=3.0)
     draw_bed_unisim(ax, CX_LITS, Y_LIT2, LIT_W, LIT_H, 2,
                     T_ins[1], T_outs[1], taus[1], dp_kpa=dp_lits[1])
     pipe(ax, CX_LITS, Y_LIT2 + LIT_H / 2, CX_LITS, Y_LIT3 - LIT_H / 2,
-         color=C_GAZ_JAUNE, lw=4.0)
-
-    # --- Lit 3 ---
+         color=C_GAZ_JAUNE, lw=3.0)
     draw_bed_unisim(ax, CX_LITS, Y_LIT3, LIT_W, LIT_H, 3,
                     T_ins[2], T_outs[2], taus[2], dp_kpa=dp_lits[2])
 
-    # --- Connexion Lit3 → Tour JD02 ---
     pipe(ax, CX_LITS + LIT_W / 2, Y_LIT3,
          CX_JD02 - TOUR_W / 2, Y_LIT3,
-         color=C_GAZ_JAUNE, lw=4.0)
+         color=C_GAZ_JAUNE, lw=3.0, tag='F-B3-JD02')
 
-    # --- Tour JD02 (absorption intermédiaire) ---
     draw_absorption_tower_unisim(ax, CX_JD02, Y_LIT3, TOUR_W, TOUR_H,
                                  'JD02\nINTER', '401AJ02')
 
-    # Entrée acide JD02
-    pipe(ax, CX_JD02, Y_LIT3 + TOUR_H / 2 + 0.60,
+    pipe(ax, CX_JD02, Y_LIT3 + TOUR_H / 2 + 0.50,
          CX_JD02, Y_LIT3 + TOUR_H / 2,
-         color=C_ACID_VIOLET, lw=3.0)
-    data_box(ax, CX_JD02 + 0.20, Y_LIT3 + TOUR_H / 2 + 0.62, [
-        ("H₂SO₄ IN  T :", f"{jd02.get('T_acid_in', 0):.1f} °C"),
-        ("w           :", "98.50 %"),
-    ], w=3.00)
+         color=C_ACID_VIOLET, lw=2.0, tag='F-AIN2')
+    data_box(ax, CX_JD02 + 0.12, Y_LIT3 + TOUR_H / 2 + 0.52, [
+        (f"H₂SO₄ IN  T={jd02.get('T_acid_in', 0):.2f}", "°C"),
+        ('w ≈ 98.50', "%"),
+    ], w=2.60)
 
-    # Sortie acide JD02
     pipe(ax, CX_JD02, Y_LIT3 - TOUR_H / 2,
-         CX_JD02, Y_LIT3 - TOUR_H / 2 - 0.55,
-         color=C_ACID_VIOLET, lw=3.0)
+         CX_JD02, Y_LIT3 - TOUR_H / 2 - 0.45,
+         color=C_ACID_VIOLET, lw=2.0, tag='F-AOUT2')
 
-    # Données de la tour JD02 (boîte élargie)
-    data_box(ax, CX_JD02 + TOUR_W / 2 - 1, Y_LIT3 - 2.95, [
-        ("T gaz  :", f"{jd02.get('T_gas_out',   0):.1f} °C"),
-        ("η      :", f"{jd02.get('eff_abs',     0):.2f} %"),
-        ("SO3    :", f"{jd02.get('ppm_SO3_out', 0):.2f} ppm"),
-        ("T acid :", f"{jd02.get('T_acid_out',  0):.1f} °C"),
-        ("w H2SO4:", f"{jd02.get('w_H2SO4_out', 0):.2f} %"),
-    ], w=2.80)
+    data_box(ax, CX_JD02 + TOUR_W / 2 + 0.12, Y_LIT3 - 0.45, [
+        (f"T_gas  = {jd02.get('T_gas_out',  0):.2f}", "°C"),
+        (f"η      = {jd02.get('eff_abs',    0):.2f}", "%"),
+        (f"SO₃    = {jd02.get('ppm_SO3_out', 0):.2f}", "ppm"),
+        (f"T_acid = {jd02.get('T_acid_out', 0):.2f}", "°C"),
+        (f"w      = {jd02.get('w_H2SO4_out', 0):.2f}", "% H₂SO₄"),
+    ], w=2.20)
 
-    # --- Bypass gaz désulfuré ---
-    Y_BYPASS = Y_LIT4 + 0.65
+    Y_BYPASS = Y_LIT4 + 0.55
     pipe(ax, CX_JD02, Y_LIT3 + TOUR_H / 2,
          CX_JD02, Y_BYPASS,
-         color=C_AIR, lw=3.0)
+         color=C_AIR, lw=2.5, tag='F-JD02-UP')
     pipe(ax, CX_JD02, Y_BYPASS,
          CX_LITS + LIT_W / 2, Y_BYPASS,
-         color=C_AIR, lw=3.0)
+         color=C_AIR, lw=2.5)
     pipe(ax, CX_LITS + LIT_W / 2, Y_BYPASS,
          CX_LITS + LIT_W / 2, Y_LIT4 + LIT_H / 2,
-         color=C_AIR, lw=3.0)
-    data_box(ax, CX_LITS + LIT_W / 2 + 0.20, Y_BYPASS - 0.25, [
-        ("Gaz désulfuré  T :", f"{jd02.get('T_gas_out', 0):.1f} °C"),
-    ], w=3.20)
+         color=C_AIR, lw=2.5)
+    data_box(ax, CX_LITS + LIT_W / 2 + 0.10, Y_BYPASS - 0.18, [
+        (f"Desulfurized gas  T={jd02.get('T_gas_out', 0):.2f}", "°C"),
+    ], w=2.80)
 
-    # --- Lit 4 ---
     draw_bed_unisim(ax, CX_LITS, Y_LIT4, LIT_W, LIT_H, 4,
                     T_ins[3], T_outs[3], taus[3], dp_kpa=dp_lits[3])
 
-    # --- Connexion Lit4 → Tour JD03 ---
     pipe(ax, CX_LITS - LIT_W / 2, Y_LIT4,
          CX_JD03 + TOUR_W / 2, Y_LIT4,
-         color=C_GAZ_JAUNE, lw=4.0)
+         color=C_GAZ_JAUNE, lw=3.0, tag='F-B4-JD03')
 
-    # --- Tour JD03 (absorption finale) ---
     draw_absorption_tower_unisim(ax, CX_JD03, Y_LIT4, TOUR_W, TOUR_H,
                                  'JD03\nFINAL', '401AJ03')
 
-    # Entrée acide JD03
-    pipe(ax, CX_JD03, Y_LIT4 + TOUR_H / 2 + 0.60,
+    pipe(ax, CX_JD03, Y_LIT4 + TOUR_H / 2 + 0.50,
          CX_JD03, Y_LIT4 + TOUR_H / 2,
-         color=C_ACID_VIOLET, lw=3.0)
-    data_box(ax, CX_JD03-0.6, Y_LIT4 + TOUR_H / 2 + 0.62, [
-        ("H₂SO₄ IN  T :", f"{jd03.get('T_acid_in', 0):.1f} °C"),
-        ("w           :", "98.50 %"),
-    ], w=3.00)
+         color=C_ACID_VIOLET, lw=2.0, tag='F-AIN3')
+    data_box(ax, CX_JD03 + 0.12, Y_LIT4 + TOUR_H / 2 + 0.52, [
+        (f"H₂SO₄ IN  T={jd03.get('T_acid_in', 0):.2f}", "°C"),
+        ('w ≈ 98.50', "%"),
+    ], w=2.60)
 
-    # Sortie acide JD03
     pipe(ax, CX_JD03, Y_LIT4 - TOUR_H / 2,
-         CX_JD03, Y_LIT4 - TOUR_H / 2 - 0.55,
-         color=C_ACID_VIOLET, lw=3.0)
+         CX_JD03, Y_LIT4 - TOUR_H / 2 - 0.45,
+         color=C_ACID_VIOLET, lw=2.0, tag='F-AOUT3')
 
-    # Données de la tour JD03 (boîte élargie)
-    data_box(ax, CX_JD03- 0.6 , Y_LIT4 - 2.87, [
-        ("T gaz  :", f"{jd03.get('T_gas_out',   0):.1f} °C"),
-        ("η      :", f"{jd03.get('eff_abs',      0):.2f} %"),
-        ("SO3    :", f"{jd03.get('ppm_SO3_out',  0):.2f} ppm"),
-        ("T acid :", f"{jd03.get('T_acid_out',   0):.1f} °C"),
-        ("w H2SO4:", f"{jd03.get('w_H2SO4_out',  0):.2f} %"),
-    ], w=2.80)
+    data_box(ax, CX_JD03 - TOUR_W / 2 - 2.32, Y_LIT4 - 0.45, [
+        (f"T_gas  = {jd03.get('T_gas_out',  0):.2f}", "°C"),
+        (f"η      = {jd03.get('eff_abs',     0):.2f}", "%"),
+        (f"SO₃    = {jd03.get('ppm_SO3_out', 0):.2f}", "ppm"),
+        (f"T_acid = {jd03.get('T_acid_out', 0):.2f}", "°C"),
+        (f"w      = {jd03.get('w_H2SO4_out', 0):.2f}", "% H₂SO₄"),
+    ], w=2.20)
 
-    
+    pipe(ax, CX_JD03, Y_LIT4 + TOUR_H / 2,
+         CX_JD03, Y_LIT4 + TOUR_H / 2 + 1.00,
+         color=C_AIR, lw=2.5)
+   
 
     return fig
 
 
 # ══════════════════════════════════════════════════════════════════════
-# STREAMLIT CONFIG STYLE UNISIM
+# STREAMLIT CONFIG — UNISIM STYLE
 # ══════════════════════════════════════════════════════════════════════
 
 st.set_page_config(
-    page_title="Supervision UniSim-Design — Acid Plant",
+    page_title="UniSim-Design Supervision — Acid Plant",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -1524,7 +1414,7 @@ details { background: #C8C8C8 !important; border: 1px solid #999 !important;
 
 st.markdown(f"""
 <div class="unisim-titlebar">
-  <span>Supervision de la simulation  |  Sulfuric Acid Plant  |
+  <span>Simulation Supervision  |  Sulfuric Acid Plant  |
         {datetime.now().strftime('%d/%m/%Y  %H:%M:%S')}</span>
   <div class="unisim-winbtns">
     <div class="unisim-winbtn btn-min">─</div>
@@ -1534,68 +1424,68 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ── Initialisation TankSystem ────────────────────────────────────────
+# ── TankSystem initialization ────────────────────────────────────────
 if 'tank_system' not in st.session_state:
     st.session_state.tank_system = TankSystem()
 
 
 # ══════════════════════════════════════════════════════════════════════
-# TABS
+# TABS — including tab6 DYNAMIC
 # ══════════════════════════════════════════════════════════════════════
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "GLOBAL PROCESS",
-    " TRAITEMENT D'AIR",
-    "FOUR & CHAUDIERE",
-    "CONVERTISSEUR & ABSORPTION",
-    "DYNAMIQUE",
-    "3D",
+    "AIR TREATMENT",
+    "FURNACE & BOILER",
+    "CONVERTER & EXCHANGERS",
+    "CONVERTER & ABSORPTION",
+    "DYNAMIC",
 ])
 
 # ══════════════════════════════════════════════════════════════════════
 # TAB 1 — GLOBAL PROCESS
 # ══════════════════════════════════════════════════════════════════════
 with tab1:
-    with st.expander("⚙ PARAMÈTRES PROCÉDÉ", expanded=True):
+    with st.expander("⚙ PROCESS PARAMETERS", expanded=True):
         c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
-            S_kgm = st.slider("Soufre (kg/min)", 500.0, 1500.0, DEFAULT_S, 10.0, key="g_s")
+            S_kgm = st.slider("Sulfur (kg/min)", 500.0, 1500.0, DEFAULT_S, 10.0, key="g_s")
         with c2:
-            T_s = st.slider("T soufre (°C)", 100.0, 160.0, DEFAULT_T_S, 1.0, key="g_ts")
+            T_s = st.slider("Sulfur T (°C)", 100.0, 160.0, DEFAULT_T_S, 1.0, key="g_ts")
         with c3:
             Air_nm3h = st.slider("Air (Nm³/h)", 250000.0, 500000.0, DEFAULT_AIR, 5000.0, key="g_air")
         with c4:
-            T_air = st.slider("T air (°C)", 80.0, 180.0, DEFAULT_T_AIR, 1.0, key="g_tair")
+            T_air = st.slider("Air T (°C)", 80.0, 180.0, DEFAULT_T_AIR, 1.0, key="g_tair")
         with c5:
-            ratio_p = st.slider("Ratio air primaire", 0.3, 0.8, DEFAULT_RATIO, 0.01, key="g_ratio")
+            ratio_p = st.slider("Primary air ratio", 0.3, 0.8, DEFAULT_RATIO, 0.01, key="g_ratio")
 
-    with st.expander(" BACS SOUFRE", expanded=False):
+    with st.expander("SULFUR TANKS", expanded=False):
         bs1, bs2, bs3 = st.columns(3)
         with bs1:
-            sulfur_in_1 = st.slider("Livraison bac S1 (m³/s)", 0.0, 0.05, 0.0, 0.001, format="%.3f", key="bs_in1")
+            sulfur_in_1 = st.slider("Tank S1 delivery (m³/s)", 0.0, 0.05, 0.0, 0.001, format="%.3f", key="bs_in1")
         with bs2:
-            sulfur_in_2 = st.slider("Livraison bac S2 (m³/s)", 0.0, 0.05, 0.0, 0.001, format="%.3f", key="bs_in2")
+            sulfur_in_2 = st.slider("Tank S2 delivery (m³/s)", 0.0, 0.05, 0.0, 0.001, format="%.3f", key="bs_in2")
         with bs3:
-            split_ratio = st.slider("Split bac1/bac2 → four", 0.1, 0.9, 0.5, 0.05, key="bs_split")
+            split_ratio = st.slider("Tank1/Tank2 → furnace split", 0.1, 0.9, 0.5, 0.05, key="bs_split")
         bs4, bs5, bs6 = st.columns(3)
         with bs4:
-            sulfur_T_in = st.slider("T soufre livré (°C)", 120.0, 150.0, 140.0, 1.0, key="bs_tin")
+            sulfur_T_in = st.slider("Delivered sulfur T (°C)", 120.0, 150.0, 140.0, 1.0, key="bs_tin")
         with bs5:
-            h_s1_init = st.slider("Niveau init. bac S1 (%)", 10.0, 100.0,
+            h_s1_init = st.slider("Initial level tank S1 (%)", 10.0, 100.0,
                                   st.session_state.tank_system.sulfur_tank_1.level_pct, 1.0, key="bs_h1")
         with bs6:
-            h_s2_init = st.slider("Niveau init. bac S2 (%)", 10.0, 100.0,
+            h_s2_init = st.slider("Initial level tank S2 (%)", 10.0, 100.0,
                                   st.session_state.tank_system.sulfur_tank_2.level_pct, 1.0, key="bs_h2")
 
-    with st.expander(" BAC ACIDE", expanded=False):
+    with st.expander("ACID TANK", expanded=False):
         ba1, ba2, ba3, ba4 = st.columns(4)
         with ba1:
-            acid_prod_m3s = st.slider("Production acide (m³/s)", 0.0, 0.10, 0.03, 0.001, format="%.3f", key="ba_prod")
+            acid_prod_m3s = st.slider("Acid production (m³/s)", 0.0, 0.10, 0.03, 0.001, format="%.3f", key="ba_prod")
         with ba2:
-            acid_out_m3s = st.slider("Expédition acide (m³/s)", 0.0, 0.10, 0.025, 0.001, format="%.3f", key="ba_out")
+            acid_out_m3s = st.slider("Acid dispatch (m³/s)", 0.0, 0.10, 0.025, 0.001, format="%.3f", key="ba_out")
         with ba3:
-            acid_T_in = st.slider("T acide entrant (°C)", 30.0, 80.0, 55.0, 0.5, key="ba_tin")
+            acid_T_in = st.slider("Incoming acid T (°C)", 30.0, 80.0, 55.0, 0.5, key="ba_tin")
         with ba4:
-            dt_step = st.slider("Pas de temps bacs (s)", 10.0, 600.0, 60.0, 10.0, key="ba_dt")
+            dt_step = st.slider("Tank time step (s)", 10.0, 600.0, 60.0, 10.0, key="ba_dt")
 
     ts = st.session_state.tank_system
     if abs(ts.sulfur_tank_1.level_pct - h_s1_init) > 2.0:
@@ -1610,7 +1500,7 @@ with tab1:
     )
     ts.step(dt=float(dt_step))
 
-    with st.spinner("Calcul dynamique en cours..."):
+    with st.spinner("Running dynamic calculation..."):
         results1 = simuler_complet(S_kgm, Air_nm3h, ratio_p, T_air, T_s)
         P_ATM = 101325.0
         af1 = AirFilter(); af1.Q_gas_Nm3h = Air_nm3h; af1.T_in = 30.0; af1.P_in = P_ATM
@@ -1629,18 +1519,14 @@ with tab1:
             dr1 = {'TG_out': Taf1, 'TL_out': 50.0, 'eff': 0.0, 'w_gNm3': 0.0, 'w_H2SO4_in': 98.6}
         tr1 = TurboBlowerTrain(); tr1.Q_gas_Nm3h = Air_nm3h; tr1.T_in = dr1.get('TG_out', Taf1)
         turbo1 = tr1.compute(load=1.0)
-        st.session_state['_3d_results'] = results1
-        st.session_state['_3d_fr']      = fr1
-        st.session_state['_3d_dr']      = dr1
-        st.session_state['_3d_turbo']   = turbo1
-        st.session_state['_3d_tank']    = ts
+
     if results1:
         tau_g = results1['convertisseur'].get('tau_final_pct', 0.0)
         col_a, col_b, col_c, col_d = st.columns(4)
-        col_a.metric("τ global convertisseur", f"{tau_g:.2f} %")
-        col_b.metric("T sortie four", f"{results1['four']['T_out']:.1f} °C")
-        col_c.metric("Vapeur produite", f"{results1['chaudiere']['steam_flow']:.1f} t/h")
-        col_d.metric("Puissance récupérée", f"{results1['chaudiere']['power_mw']:.2f} MW")
+        col_a.metric("Global converter τ", f"{tau_g:.2f} %")
+        col_b.metric("Furnace outlet T", f"{results1['four']['T_out']:.1f} °C")
+        col_c.metric("Steam produced", f"{results1['chaudiere']['steam_flow']:.1f} t/h")
+        col_d.metric("Recovered power", f"{results1['chaudiere']['power_mw']:.2f} MW")
 
         fig1 = draw_flowsheet(results1, S_kgm, Air_nm3h, T_air, T_s, ratio_p,
                               turbo1, dr1, fr1, ts)
@@ -1650,20 +1536,20 @@ with tab1:
             f'style="width:100%;min-height:75vh;object-fit:contain;display:block;" />',
             unsafe_allow_html=True)
     else:
-        st.error("Erreur de simulation.")
+        st.error("Simulation error.")
 
 # ══════════════════════════════════════════════════════════════════════
-# TAB 2 — TRAITEMENT AIR
+# TAB 2 — AIR TREATMENT
 # ══════════════════════════════════════════════════════════════════════
 with tab2:
-    st.markdown('<div class="ctrl-panel"><div class="ctrl-title">⚙ PARAMÈTRES — TRAITEMENT AIR</div>',
+    st.markdown('<div class="ctrl-panel"><div class="ctrl-title">⚙ PARAMETERS — AIR TREATMENT</div>',
                 unsafe_allow_html=True)
     ca1, ca2, ca3, ca4, ca5 = st.columns(5)
-    with ca1: Air_t2    = st.slider("Débit air (Nm³/h)",   250000.0, 500000.0, DEFAULT_AIR,  5000.0, key="at_air")
-    with ca2: T_air_t2  = st.slider("T air ambiant (°C)",      10.0,     50.0,       30.0,     1.0, key="at_tair")
-    with ca3: P_air_kPa = st.slider("Pression air (kPa)",       95.0,    110.0,      101.3,     0.1, key="at_p")
-    with ca4: Q_acid_t2 = st.slider("Débit acide (m³/h)",      800.0,  1800.0,     1245.0,    10.0, key="at_qa")
-    with ca5: T_acid_t2 = st.slider("T acide entrée (°C)",      40.0,     75.0,       50.0,     0.5, key="at_ta")
+    with ca1: Air_t2    = st.slider("Air flow (Nm³/h)",        250000.0, 500000.0, DEFAULT_AIR,  5000.0, key="at_air")
+    with ca2: T_air_t2  = st.slider("Ambient air T (°C)",           10.0,     50.0,       30.0,     1.0, key="at_tair")
+    with ca3: P_air_kPa = st.slider("Air pressure (kPa)",            95.0,    110.0,      101.3,     0.1, key="at_p")
+    with ca4: Q_acid_t2 = st.slider("Acid flow (m³/h)",             800.0,  1800.0,     1245.0,    10.0, key="at_qa")
+    with ca5: T_acid_t2 = st.slider("Acid inlet T (°C)",             40.0,     75.0,       50.0,     0.5, key="at_ta")
     st.markdown('</div>', unsafe_allow_html=True)
 
     P_ATM2 = P_air_kPa * 1000.0
@@ -1692,22 +1578,22 @@ with tab2:
         unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════
-# TAB 3 — FOUR DE COMBUSTION
+# TAB 3 — COMBUSTION FURNACE
 # ══════════════════════════════════════════════════════════════════════
 with tab3:
-    st.markdown('<div class="ctrl-panel"><div class="ctrl-title">⚙ PARAMÈTRES — FOUR & CHAUDIÈRE</div>',
+    st.markdown('<div class="ctrl-panel"><div class="ctrl-title">⚙ PARAMETERS — FURNACE & BOILER</div>',
                 unsafe_allow_html=True)
     cb1, cb2, cb3, cb4, cb5, cb6 = st.columns(6)
-    with cb1: S_t3     = st.slider("Soufre (kg/min)",    500.0,  1500.0, DEFAULT_S,           10.0, key="fb_s")
-    with cb2: Ts_t3    = st.slider("T soufre (°C)",      100.0,   160.0, DEFAULT_T_S,           1.0, key="fb_ts")
-    with cb3: Air_t3   = st.slider("Débit air (Nm³/h)", 250000.0, 500000.0, DEFAULT_AIR,      5000.0, key="fb_air")
-    with cb4: Tair_t3  = st.slider("T air (°C)",          80.0,   180.0, DEFAULT_T_AIR,         1.0, key="fb_tair")
-    with cb5: ratio_t3 = st.slider("Ratio air 2nd",        0.2,     0.7, 1.0 - DEFAULT_RATIO,  0.01, key="fb_ratio")
-    with cb6: T_cible  = st.slider("T cible conv. (°C)", 380.0,   450.0, float(T_TARGET_CONV),  1.0, key="fb_tcible")
+    with cb1: S_t3     = st.slider("Sulfur (kg/min)",       500.0,  1500.0, DEFAULT_S,           10.0, key="fb_s")
+    with cb2: Ts_t3    = st.slider("Sulfur T (°C)",         100.0,   160.0, DEFAULT_T_S,           1.0, key="fb_ts")
+    with cb3: Air_t3   = st.slider("Air flow (Nm³/h)",   250000.0, 500000.0, DEFAULT_AIR,       5000.0, key="fb_air")
+    with cb4: Tair_t3  = st.slider("Air T (°C)",             80.0,   180.0, DEFAULT_T_AIR,         1.0, key="fb_tair")
+    with cb5: ratio_t3 = st.slider("Secondary air ratio",    0.2,     0.7, 1.0 - DEFAULT_RATIO,  0.01, key="fb_ratio")
+    with cb6: T_cible  = st.slider("Target conv. T (°C)",  380.0,   450.0, float(T_TARGET_CONV),  1.0, key="fb_tcible")
     st.markdown('</div>', unsafe_allow_html=True)
 
     ratio_p_t3 = 1.0 - ratio_t3
-    with st.spinner("Calcul four + chaudière (dynamique)..."):
+    with st.spinner("Computing furnace + boiler (dynamic)..."):
         res3 = simuler_complet(S_t3, Air_t3, ratio_p_t3, Tair_t3, Ts_t3)
     tr3 = TurboBlowerTrain(); tr3.Q_gas_Nm3h = Air_t3; tr3.T_in = 30.0
     turbo3 = tr3.compute(load=1.0)
@@ -1720,120 +1606,121 @@ with tab3:
             f'style="width:100%;object-fit:contain;display:block;" />',
             unsafe_allow_html=True)
     else:
-        st.error("Erreur de simulation.")
-
+        st.error("Simulation error.")
 
 # ══════════════════════════════════════════════════════════════════════
-# TAB 4 — ÉCHANGEURS
+# TAB 4 — CONVERTER & ABSORPTION
 # ══════════════════════════════════════════════════════════════════════
 with tab4:
-    st.markdown('<div class="ctrl-panel"><div class="ctrl-title">⚙ Control Panel — Converter & Absorption</div>',
+    st.markdown('<div class="ctrl-panel"><div class="ctrl-title">⚙ PARAMETERS — CONVERTER & ABSORPTION</div>',
                 unsafe_allow_html=True)
     cc1, cc2, cc3, cc4, cc5 = st.columns(5)
-    with cc1: T_in_lit1 = st.slider("T entrée BED 1 (°C)", 380.0, 450.0, float(T_TARGET_CONV), 1.0, key="cv_t1")
-    with cc2: T_in_lit2 = st.slider("T entrée BED 2 (°C)", 400.0, 480.0, 454.0, 1.0, key="cv_t2")
-    with cc3: T_in_lit3 = st.slider("T entrée BED 3 (°C)", 400.0, 470.0, 449.0, 1.0, key="cv_t3")
-    with cc4: T_in_lit4 = st.slider("T entrée BED 4 (°C)", 390.0, 450.0, 425.0, 1.0, key="cv_t4")
-    with cc5: S_t4      = st.slider("Soufre (kg/min)",      500.0, 1500.0, DEFAULT_S, 10.0, key="cv_s")
+    with cc1: T_in_lit1 = st.slider("BED 1 inlet T (°C)", 380.0, 450.0, float(T_TARGET_CONV), 1.0, key="cv_t1")
+    with cc2: T_in_lit2 = st.slider("BED 2 inlet T (°C)", 400.0, 480.0, 454.0, 1.0, key="cv_t2")
+    with cc3: T_in_lit3 = st.slider("BED 3 inlet T (°C)", 400.0, 470.0, 449.0, 1.0, key="cv_t3")
+    with cc4: T_in_lit4 = st.slider("BED 4 inlet T (°C)", 390.0, 450.0, 425.0, 1.0, key="cv_t4")
+    with cc5: S_t4      = st.slider("Sulfur (kg/min)",     500.0, 1500.0, DEFAULT_S, 10.0, key="cv_s")
     st.markdown('</div>', unsafe_allow_html=True)
 
     T_in_lits_user = [T_in_lit1, T_in_lit2, T_in_lit3, T_in_lit4]
-    with st.spinner("Calcul convertisseur + absorption..."):
+    with st.spinner("Computing converter + absorption (dynamic)..."):
         res4 = simuler_complet(S_t4, DEFAULT_AIR, DEFAULT_RATIO, DEFAULT_T_AIR, DEFAULT_T_S)
 
     if res4:
         res4['convertisseur']['T_in_lits'] = T_in_lits_user
         fig4 = render_page_conv_absorption(res4, T_in_lits_user)
-        buf4 = io.BytesIO()
-        fig4.savefig(buf4, format="png", dpi=140, bbox_inches='tight',
-                     pad_inches=0.05, facecolor=fig4.get_facecolor())
-        buf4.seek(0)
+        b64_t4 = _fig_to_b64(fig4, dpi=140)
         st.markdown(
-            f'<img src="data:image/png;base64,{base64.b64encode(buf4.read()).decode()}" '
+            f'<img src="data:image/png;base64,{b64_t4}" '
             f'style="width:100%;object-fit:contain;display:block;" />',
             unsafe_allow_html=True)
-        plt.close(fig4)
     else:
-        st.error("Erreur de simulation.")
+        st.error("Simulation error.")
 
 # ══════════════════════════════════════════════════════════════════════
-# TAB 5 — DYNAMIQUE
+# TAB 5 — HEAT EXCHANGERS
 # ══════════════════════════════════════════════════════════════════════
 with tab5:
-    st.markdown('<div class="ctrl-panel"><div class="ctrl-title">⚙ PARAMÈTRES — SIMULATION DYNAMIQUE</div>',
+    st.markdown('<div class="ctrl-panel"><div class="ctrl-title">⚙ PARAMETERS — HEAT EXCHANGERS</div>',
+                unsafe_allow_html=True)
+    hx_c1, hx_c2, hx_c3, hx_c4, hx_c5, hx_c6 = st.columns(6)
+    with hx_c1: hx_S          = st.slider("Sulfur (kg/min)",          500.0,   1500.0, DEFAULT_S,   10.0, key="hx_s")
+    with hx_c2: hx_air         = st.slider("Air (Nm³/h)",         250_000.0, 500_000.0, DEFAULT_AIR, 5_000.0, key="hx_air")
+    with hx_c3: hx_T_sh_gas_in = st.slider("Gas → SH1B T (°C)",       580.0,    680.0,    627.0,    1.0, key="hx_sh_tin")
+    with hx_c4: hx_T_hi_gas_in = st.slider("Gas → Hot IHX T (°C)",    480.0,    560.0,    516.0,    1.0, key="hx_hi_tin")
+    with hx_c5: hx_T_ci_gas_in = st.slider("Gas → Cold IHX T (°C)",   420.0,    500.0,    460.0,    1.0, key="hx_ci_tin")
+    with hx_c6: hx_T_bed4_out  = st.slider("Gas → HP4A T (°C)",       360.0,    450.0,    406.0,    1.0, key="hx_bed4_out")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    with st.spinner("Computing heat exchangers..."):
+        _res_hx = simuler_complet(hx_S, hx_air, DEFAULT_RATIO, DEFAULT_T_AIR, DEFAULT_T_S)
+        _comp_interpass = {'SO2': 0.05, 'SO3': 0.02, 'O2': 0.09, 'N2': 0.84}
+        _comp_final     = {'SO2': 0.003, 'SO3': 0.05, 'O2': 0.10, 'N2': 0.847}
+        _mdot_gas = hx_S / 60.0 * 2.0 * 5.5
+
+        def _run_hx(cls, T_gas_in_C, P_gas=150_000.0, comp=None):
+            hx = cls()
+            hx.set_gas_inlet(
+                T_C=T_gas_in_C, P_Pa=P_gas, mdot_kg_s=_mdot_gas,
+                composition=(comp or _comp_interpass),
+            )
+            return hx.compute()
+
+        r_sh   = _run_hx(HPSuperheater1B,  hx_T_sh_gas_in)
+        r_hi   = _run_hx(HotInterpassHX,   hx_T_hi_gas_in)
+        r_ci   = _run_hx(ColdInterpassHX,  hx_T_ci_gas_in)
+        r_ec   = _run_hx(Economizer3B,     r_ci.get('T_gas_out_C', 306.0))
+        r_hp4a = _run_hx(HP4AExchanger,    hx_T_bed4_out,                    comp=_comp_final)
+        r_lp4a = _run_hx(LP4AExchanger,    r_hp4a.get('T_gas_out_C', 340.0), comp=_comp_final)
+        r_e4c  = _run_hx(E4CExchanger,     r_lp4a.get('T_gas_out_C', 270.0), comp=_comp_final)
+        r_e4a  = _run_hx(E4AExchanger,     r_e4c.get('T_gas_out_C', 200.0),  comp=_comp_final)
+
+        hx_results = {
+            'hp_superheater_1b': r_sh,
+            'hot_interpass':     r_hi,
+            'cold_interpass':    r_ci,
+            'economizer_3b':     r_ec,
+            'hp4a':  r_hp4a, 'lp4a': r_lp4a,
+            'e4c':   r_e4c,  'e4a':  r_e4a,
+        }
+        _conv_res_hx = _res_hx.get('convertisseur', {}) if _res_hx else {}
+
+        if 'T_in_lits' not in _conv_res_hx:
+            _conv_res_hx['T_in_lits'] = [420.0, 454.0, 449.0, 425.0]
+        if 'T_out_lits' not in _conv_res_hx:
+            _conv_res_hx['T_out_lits'] = [580.0, 520.0, 480.0, 430.0]
+        if 'dp_lits' not in _conv_res_hx:
+            _conv_res_hx['dp_lits'] = [1.69, 1.75, 2.14, 1.90]
+
+        fig5 = render_page_exchangers(hx_results, conv_results=_conv_res_hx)
+
+    b64_t5 = _fig_to_b64(fig5, dpi=150)
+    st.markdown(
+        f'<img src="data:image/png;base64,{b64_t5}" '
+        f'style="width:100%;min-height:75vh;object-fit:contain;display:block;" />',
+        unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════
+# TAB 6 — DYNAMIC
+# ══════════════════════════════════════════════════════════════════════
+with tab6:
+    st.markdown('<div class="ctrl-panel"><div class="ctrl-title">⚙ PARAMETERS — DYNAMIC SIMULATION</div>',
                 unsafe_allow_html=True)
     dyn_c1, dyn_c2, dyn_c3, dyn_c4 = st.columns(4)
     with dyn_c1:
-        dyn_S    = st.slider("Soufre nominal (kg/min)", 500.0, 1500.0, DEFAULT_S,   10.0, key="dyn_s")
+        dyn_S    = st.slider("Nominal sulfur (kg/min)", 500.0, 1500.0, DEFAULT_S,   10.0, key="dyn_s")
     with dyn_c2:
-        dyn_air  = st.slider("Air nominal (Nm³/h)",    250000.0, 500000.0, DEFAULT_AIR, 5000.0, key="dyn_air")
+        dyn_air  = st.slider("Nominal air (Nm³/h)",    250000.0, 500000.0, DEFAULT_AIR, 5000.0, key="dyn_air")
     with dyn_c3:
-        dyn_tair = st.slider("T air (°C)",              80.0, 180.0, DEFAULT_T_AIR,  1.0, key="dyn_tair")
+        dyn_tair = st.slider("Air T (°C)",              80.0, 180.0, DEFAULT_T_AIR,  1.0, key="dyn_tair")
     with dyn_c4:
-        dyn_ts   = st.slider("T soufre (°C)",          100.0, 160.0, DEFAULT_T_S,    1.0, key="dyn_ts")
+        dyn_ts   = st.slider("Sulfur T (°C)",          100.0, 160.0, DEFAULT_T_S,    1.0, key="dyn_ts")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    with st.spinner("Calcul simulation dynamique en cours..."):
+    with st.spinner("Running dynamic simulation..."):
         res_dyn = simuler_complet(dyn_S, dyn_air, DEFAULT_RATIO, dyn_tair, dyn_ts)
 
     if res_dyn:
         render_page_dynamique(res_dyn)
     else:
-        st.error("Erreur lors du calcul de la simulation dynamique. Vérifiez les paramètres.")
-
-
-
-with tab6:
-    # Récupération des résultats calculés dans tab1
-    # (fr1, dr1, turbo1, ts sont stockés en session_state lors du calcul tab1)
-    _res3d   = st.session_state.get('_3d_results', None)
-    _fr3d    = st.session_state.get('_3d_fr',      {})
-    _dr3d    = st.session_state.get('_3d_dr',      {})
-    _turbo3d = st.session_state.get('_3d_turbo',   {})
-    _tank3d  = st.session_state.get('_3d_tank',    None)
- 
-    # Si tab6 est ouvert avant tab1 (1er chargement de l'app),
-    # on recalcule les données nécessaires.
-    if _res3d is None:
-        with st.spinner("Calcul initial pour la vue 3D..."):
-            _res3d = simuler_complet(S_kgm, Air_nm3h, ratio_p, T_air, T_s)
-            P_ATM_3d = 101325.0
-            _af3d = AirFilter()
-            _af3d.Q_gas_Nm3h = Air_nm3h
-            _af3d.T_in = 30.0
-            _af3d.P_in = P_ATM_3d
-            try:
-                _fr3d = _af3d.compute(t_hours=0.0)
-                if 'P_in_Pa' not in _fr3d:
-                    _fr3d['P_in_Pa'] = P_ATM_3d
-                _Taf3d = _fr3d['T_out']
-            except Exception:
-                _fr3d  = {'delta_P_mmWC': 0.0, 'T_out': 30.0,
-                          'P_in_Pa': P_ATM_3d, 'P_out_Pa': P_ATM_3d}
-                _Taf3d = 30.0
- 
-            _dt3d = DryingTower()
-            _dt3d.Q_gas_Nm3h = Air_nm3h
-            _dt3d.Q_acid_m3h = 1245.0
-            _dt3d.T_acid_in  = 50.0
-            _dt3d.T_gas_in   = _Taf3d
-            try:
-                _dr3d = _dt3d.compute()
-                _dr3d['w_H2SO4_in'] = _dt3d.w_H2SO4_in * 100.0
-            except Exception:
-                _dr3d = {'TG_out': _Taf3d, 'TL_out': 50.0,
-                         'eff': 0.0, 'w_gNm3': 0.0, 'w_H2SO4_in': 98.6}
- 
-            _tr3d = TurboBlowerTrain()
-            _tr3d.Q_gas_Nm3h = Air_nm3h
-            _tr3d.T_in       = _dr3d.get('TG_out', _Taf3d)
-            _turbo3d = _tr3d.compute(load=1.0)
-            _tank3d  = st.session_state.tank_system
- 
-    render_plant_3d(
-        resultats   = _res3d,
-        fr          = _fr3d,
-        dr          = _dr3d,
-        turbo       = _turbo3d,
-        tank_system = _tank3d,
-    )
+        st.error("Error during dynamic simulation. Please check parameters.")
