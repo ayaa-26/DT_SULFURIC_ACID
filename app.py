@@ -11,7 +11,7 @@ import io
 import sys
 import os
 import base64
-from views.plant_3d import render_plant_3d
+from plant_3d import render_plant_3d
 # ── Ajout du répertoire racine au path ────────────────────────────────
 ROOT = os.path.join(os.path.dirname(__file__), '..')
 sys.path.insert(0, ROOT)
